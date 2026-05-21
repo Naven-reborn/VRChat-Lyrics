@@ -1,0 +1,17 @@
+x64/
+.vs/
+*.user
+*.suo
+*.aps
+*.pch
+*.pdb
+*.idb
+*.exp
+*.lib
+*.ilk
+*.tlog
+out/
+build/
+deps/imgui/
+*.log
+config.json

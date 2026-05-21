@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{8C5B6A4D-1A22-4D9F-B711-AB23C0D1E5F1}</ProjectGuid>
+    <RootNamespace>vrc_lyrics</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <Keyword>Win32Proj</Keyword>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)out\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)out\$(Configuration)\obj\</IntDir>
+    <TargetName>vrc-lyrics</TargetName>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(SolutionDir)src;$(SolutionDir)deps\imgui;$(SolutionDir)deps\imgui\backends;$(SolutionDir)deps\json;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;NOMINMAX;WIN32_LEAN_AND_MEAN;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <AdditionalOptions>/utf-8 /await:strict %(AdditionalOptions)</AdditionalOptions>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>wWinMainCRTStartup</EntryPointSymbol>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;winhttp.lib;ws2_32.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\host\win32_window.cpp" />
+    <ClCompile Include="src\host\d3d11_context.cpp" />
+    <ClCompile Include="src\host\imgui_host.cpp" />
+    <ClCompile Include="src\host\tray.cpp" />
+    <ClCompile Include="src\menu\style.cpp" />
+    <ClCompile Include="src\menu\menu.cpp" />
+    <ClCompile Include="src\osc\osc_message.cpp" />
+    <ClCompile Include="src\osc\chatbox.cpp" />
+    <ClCompile Include="src\playback\smtc.cpp" />
+    <ClCompile Include="src\net\winhttp_client.cpp" />
+    <ClCompile Include="src\lyrics\lrc_parser.cpp" />
+    <ClCompile Include="src\lyrics\netease.cpp" />
+    <ClCompile Include="src\lyrics\lyrics_service.cpp" />
+    <ClCompile Include="src\util\image.cpp" />
+    <ClCompile Include="src\util\foreground.cpp" />
+    <ClCompile Include="src\config\config.cpp" />
+
+    <ClCompile Include="deps\imgui\imgui.cpp" />
+    <ClCompile Include="deps\imgui\imgui_demo.cpp" />
+    <ClCompile Include="deps\imgui\imgui_draw.cpp" />
+    <ClCompile Include="deps\imgui\imgui_tables.cpp" />
+    <ClCompile Include="deps\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="deps\imgui\backends\imgui_impl_win32.cpp" />
+    <ClCompile Include="deps\imgui\backends\imgui_impl_dx11.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="src\host\win32_window.h" />
+    <ClInclude Include="src\host\d3d11_context.h" />
+    <ClInclude Include="src\host\imgui_host.h" />
+    <ClInclude Include="src\host\tray.h" />
+    <ClInclude Include="src\menu\style.h" />
+    <ClInclude Include="src\menu\menu.h" />
+    <ClInclude Include="src\menu\MuseoSans700.h" />
+    <ClInclude Include="src\menu\MuseoSans900.h" />
+    <ClInclude Include="src\osc\osc_message.h" />
+    <ClInclude Include="src\osc\chatbox.h" />
+    <ClInclude Include="src\playback\track.h" />
+    <ClInclude Include="src\playback\smtc.h" />
+    <ClInclude Include="src\net\winhttp_client.h" />
+    <ClInclude Include="src\lyrics\lrc_parser.h" />
+    <ClInclude Include="src\lyrics\netease.h" />
+    <ClInclude Include="src\lyrics\lyrics_service.h" />
+    <ClInclude Include="src\util\image.h" />
+    <ClInclude Include="src\util\foreground.h" />
+    <ClInclude Include="src\i18n\i18n.h" />
+    <ClInclude Include="src\config\config.h" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
