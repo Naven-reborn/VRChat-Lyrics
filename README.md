@@ -35,9 +35,13 @@ C++ + ImGui · Neverlose 风格界面 · 中英繁三语 · 暗亮主题
 
 ## 📸 截图
 
-| 歌词标签 | 应用标签 | 设置(亮色) |
-|---------|---------|------------|
-| _占位_ | _占位_ | _占位_ |
+> 上方 chatbox 是 VRChat 里别人能看到的实时歌词,下方是本程序界面。
+
+<div align="center">
+  <img src="assets/screenshot-lyrics.png" width="80%" alt="歌词标签 — 正在播放卡片 + chatbox 实时推送" />
+  <br><br>
+  <img src="assets/screenshot-activity.png" width="80%" alt="应用标签 — 自动识别前台应用,附加到 chatbox" />
+</div>
 
 ## 🚀 快速开始
 
