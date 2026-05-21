@@ -4,7 +4,7 @@
 
 **网易云歌词 → VRChat chatbox 实时推送**
 
-C++ + ImGui · Neverlose 风格界面 · 中英繁三语 · 暗亮主题
+C++ + ImGui · 中英繁三语 · 暗亮主题
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg)]()
@@ -31,7 +31,7 @@ C++ + ImGui · Neverlose 风格界面 · 中英繁三语 · 暗亮主题
 - 🌐 **三语界面**:简体中文 / 繁體中文 / English,实时切换。
 - 🔔 **系统托盘**,关窗后服务在后台继续跑。
 - 💾 **设置持久化**到 `%APPDATA%\vrc-lyrics\config.json`。
-- 🖱 **无边框 + DWM 阴影**,Neverlose 风格视觉。
+- 🖱 **无边框 + DWM 阴影**
 
 ## 📸 截图
 
@@ -196,7 +196,6 @@ deps/
 
 ## 🙏 鸣谢
 
-- [**Neverlose**](https://github.com/jsopn) — GUI 视觉风格灵感
 - [**BigAtomikku/VRC-Lyrics**](https://github.com/BigAtomikku/VRC-Lyrics) — 原 Python 项目,提供功能蓝本
 - [**apoint123/inflink-rs**](https://github.com/apoint123/inflink-rs) — 让外部程序能读到网易云的关键桥梁
 - [**ocornut/imgui**](https://github.com/ocornut/imgui) — Dear ImGui
