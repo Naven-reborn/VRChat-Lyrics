@@ -41,6 +41,8 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
   <img src="assets/screenshot-lyrics.png" width="80%" alt="歌词标签 — 正在播放卡片 + chatbox 实时推送" />
   <br><br>
   <img src="assets/screenshot-activity.png" width="80%" alt="应用标签 — 自动识别前台应用,附加到 chatbox" />
+  <br><br>
+  <img src="assets/screenshot-audio.png" width="80%" alt="音频标签 — 进程级 loopback 抓网易云,通过 VB-Cable 送进 VRChat 麦克风(实机:左上角 chatbox 歌词 + 右下角中继 UI)" />
 </div>
 
 ## 🚀 快速开始
