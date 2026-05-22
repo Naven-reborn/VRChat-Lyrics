@@ -11,15 +11,22 @@
 #include "util/image.h"
 #include "util/foreground.h"
 #include "config/config.h"
+#include "audio/relay.h"
+#include "audio/devices.h"
+#include "audio/process_find.h"
+#include "audio/vbcable_installer.h"
 #include "imgui.h"
 
 #include <d3d11.h>
 #include <windowsx.h>
+#include <combaseapi.h>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <string>
 #include <thread>
+#include <atomic>
+#include <mutex>
 #include <shellscalingapi.h>
 
 #pragma comment(lib, "Shcore.lib")
@@ -107,6 +114,25 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     lyrics::Service lyrics;
     lyrics.Start();
     Log("lyrics service started");
+
+    // Audio relay. COM apartment lives inside the relay worker thread.
+    audio::Relay g_audio;
+    auto last_dev_refresh = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    auto last_netease_check = std::chrono::steady_clock::now() - std::chrono::hours(1);
+
+    // Installer runs on a detached thread; progress is published via atomics
+    // into install_state, then mirrored into menu_state each frame.
+    struct InstallState {
+        std::atomic<int>   step{ -1 };
+        std::atomic<float> fraction{ 0.f };
+        std::mutex         msg_mtx;
+        std::string        msg;
+        std::atomic<bool>  running{ false };
+    };
+    auto install_state = std::make_shared<InstallState>();
+
+    bool autostart_consumed = false;
+    bool com_init_main = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
     bool last_running = false;
     int  test_counter = 0;
@@ -242,6 +268,119 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
         last_running = menu_state.service_running;
 
+        // ---- Audio relay per-frame wiring ----
+        {
+            auto now_a = std::chrono::steady_clock::now();
+
+            // Refresh render-device list every ~2s + VB-Cable installed flag.
+            if (menu_state.audio_refresh_request ||
+                std::chrono::duration_cast<std::chrono::milliseconds>(now_a - last_dev_refresh).count() > 2000) {
+                last_dev_refresh = now_a;
+                menu_state.audio_refresh_request = false;
+                auto devs = audio::EnumRenderDevices();
+                int n = (int)devs.size();
+                if (n > 16) n = 16;
+                menu_state.audio_device_count = n;
+                bool installed = false;
+                for (int i = 0; i < n; ++i) {
+                    auto& d = devs[i];
+                    int wn = WideCharToMultiByte(CP_UTF8, 0, d.id.c_str(), (int)d.id.size(),
+                                                 menu_state.audio_devices[i].id,
+                                                 sizeof(menu_state.audio_devices[i].id) - 1,
+                                                 nullptr, nullptr);
+                    menu_state.audio_devices[i].id[wn] = 0;
+                    copy_safe(menu_state.audio_devices[i].label,
+                              sizeof(menu_state.audio_devices[i].label),
+                              d.friendly_utf8);
+                    menu_state.audio_devices[i].is_vbcable = d.is_vbcable;
+                    menu_state.audio_devices[i].is_default = d.is_default;
+                    if (d.is_vbcable) installed = true;
+                }
+                menu_state.audio_vbcable_installed = installed;
+            }
+
+            // Refresh Netease detection every ~1s.
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now_a - last_netease_check).count() > 1000) {
+                last_netease_check = now_a;
+                menu_state.audio_netease_detected = audio::FindNeteaseRoot().has_value();
+            }
+
+            // Install request.
+            if (menu_state.audio_install_request && !install_state->running.load()) {
+                menu_state.audio_install_request = false;
+                install_state->running.store(true);
+                install_state->step.store(0);
+                install_state->fraction.store(0.f);
+                {
+                    std::lock_guard<std::mutex> lk(install_state->msg_mtx);
+                    install_state->msg = "Starting...";
+                }
+                auto st = install_state;
+                std::thread([st]() {
+                    audio::vbcable::Install([st](const audio::InstallProgress& p) {
+                        st->step.store((int)p.step);
+                        st->fraction.store(p.fraction);
+                        std::lock_guard<std::mutex> lk(st->msg_mtx);
+                        st->msg = p.message;
+                    });
+                    st->running.store(false);
+                }).detach();
+            }
+            // Mirror installer state to menu_state for UI.
+            menu_state.audio_install_step     = install_state->step.load();
+            menu_state.audio_install_fraction = install_state->fraction.load();
+            {
+                std::lock_guard<std::mutex> lk(install_state->msg_mtx);
+                copy_safe(menu_state.audio_install_msg, sizeof(menu_state.audio_install_msg),
+                          install_state->msg);
+            }
+
+            // Push live tweaks into the running relay.
+            g_audio.SetGainDb(menu_state.audio_gain_db);
+            g_audio.SetLimiter(menu_state.audio_limiter);
+
+            // Start / Stop requests.
+            if (menu_state.audio_start_request) {
+                menu_state.audio_start_request = false;
+                audio::RelayConfig cfg;
+                if (menu_state.audio_target_device_id[0]) {
+                    std::string id8 = menu_state.audio_target_device_id;
+                    int wn = MultiByteToWideChar(CP_UTF8, 0, id8.c_str(), (int)id8.size(),
+                                                 nullptr, 0);
+                    cfg.target_device_id.assign(wn, L'\0');
+                    MultiByteToWideChar(CP_UTF8, 0, id8.c_str(), (int)id8.size(),
+                                        cfg.target_device_id.data(), wn);
+                }
+                cfg.gain_db = menu_state.audio_gain_db;
+                cfg.limiter = menu_state.audio_limiter;
+                g_audio.Start(cfg);
+            }
+            if (menu_state.audio_stop_request) {
+                menu_state.audio_stop_request = false;
+                g_audio.Stop();
+            }
+
+            // Pull status.
+            auto st = g_audio.GetStatus();
+            menu_state.audio_relay_running = st.running;
+            menu_state.audio_peak_dbfs     = st.peak_dbfs;
+            if (!st.error_text.empty()) {
+                copy_safe(menu_state.audio_status_text,
+                          sizeof(menu_state.audio_status_text), st.error_text);
+            } else {
+                copy_safe(menu_state.audio_status_text,
+                          sizeof(menu_state.audio_status_text), st.status_text);
+            }
+
+            // Autostart: once per session, only when fully ready.
+            if (menu_state.audio_autostart && !autostart_consumed &&
+                menu_state.audio_vbcable_installed && menu_state.audio_netease_detected &&
+                !menu_state.audio_relay_running) {
+                autostart_consumed = true;
+                menu_state.audio_start_request = true;
+            }
+        }
+
         if (menu_state.save_request) {
             menu_state.save_request = false;
             if (config::Save(menu_state)) {
@@ -273,6 +412,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     chatbox.ForceSend("");
     config::Save(menu_state);   // auto-save on quit
+    g_audio.Stop();
     lyrics.Stop();
     smtc.Stop();
     tray.Remove();
@@ -282,5 +422,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     gui.Shutdown();   Log("gui shutdown ok");
     d3d.Destroy();    Log("d3d destroy ok");
     window.Destroy(); Log("window destroy ok");
+    if (com_init_main) CoUninitialize();
     return 0;
 }

@@ -46,6 +46,9 @@ void Load(menu::State& s) {
     auto get_bool = [&](const char* k, bool& dst) {
         if (j.contains(k) && j[k].is_boolean()) dst = j[k].get<bool>();
     };
+    auto get_float = [&](const char* k, float& dst) {
+        if (j.contains(k) && j[k].is_number()) dst = j[k].get<float>();
+    };
 
     int lang = (int)s.language;
     get_int("language", lang);
@@ -64,6 +67,11 @@ void Load(menu::State& s) {
     get_str ("fmt_lyrics",         s.fmt_lyrics,    sizeof(s.fmt_lyrics));
     get_str ("fmt_no_lyrics",      s.fmt_no_lyrics, sizeof(s.fmt_no_lyrics));
     get_str ("fmt_paused",         s.fmt_paused,    sizeof(s.fmt_paused));
+
+    get_str  ("audio_target_device_id", s.audio_target_device_id, sizeof(s.audio_target_device_id));
+    get_float("audio_gain_db",          s.audio_gain_db);
+    get_bool ("audio_limiter",          s.audio_limiter);
+    get_bool ("audio_autostart",        s.audio_autostart);
 }
 
 bool Save(const menu::State& s) {
@@ -85,6 +93,11 @@ bool Save(const menu::State& s) {
     j["fmt_lyrics"]         = s.fmt_lyrics;
     j["fmt_no_lyrics"]      = s.fmt_no_lyrics;
     j["fmt_paused"]         = s.fmt_paused;
+
+    j["audio_target_device_id"] = s.audio_target_device_id;
+    j["audio_gain_db"]          = s.audio_gain_db;
+    j["audio_limiter"]          = s.audio_limiter;
+    j["audio_autostart"]        = s.audio_autostart;
 
     auto tmp = ConfigPath();
     tmp += L".tmp";

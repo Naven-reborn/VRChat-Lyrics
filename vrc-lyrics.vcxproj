@@ -57,7 +57,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <EntryPointSymbol>wWinMainCRTStartup</EntryPointSymbol>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;winhttp.lib;ws2_32.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;dwmapi.lib;winhttp.lib;ws2_32.lib;windowsapp.lib;mmdevapi.lib;avrt.lib;ole32.lib;propsys.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -106,6 +106,14 @@
     <ClCompile Include="src\util\foreground.cpp" />
     <ClCompile Include="src\config\config.cpp" />
 
+    <ClCompile Include="src\audio\limiter.cpp" />
+    <ClCompile Include="src\audio\process_find.cpp" />
+    <ClCompile Include="src\audio\devices.cpp" />
+    <ClCompile Include="src\audio\wasapi_render.cpp" />
+    <ClCompile Include="src\audio\process_loopback.cpp" />
+    <ClCompile Include="src\audio\relay.cpp" />
+    <ClCompile Include="src\audio\vbcable_installer.cpp" />
+
     <ClCompile Include="deps\imgui\imgui.cpp" />
     <ClCompile Include="deps\imgui\imgui_demo.cpp" />
     <ClCompile Include="deps\imgui\imgui_draw.cpp" />
@@ -136,6 +144,15 @@
     <ClInclude Include="src\util\foreground.h" />
     <ClInclude Include="src\i18n\i18n.h" />
     <ClInclude Include="src\config\config.h" />
+
+    <ClInclude Include="src\audio\ring_buffer.h" />
+    <ClInclude Include="src\audio\limiter.h" />
+    <ClInclude Include="src\audio\process_find.h" />
+    <ClInclude Include="src\audio\devices.h" />
+    <ClInclude Include="src\audio\wasapi_render.h" />
+    <ClInclude Include="src\audio\process_loopback.h" />
+    <ClInclude Include="src\audio\relay.h" />
+    <ClInclude Include="src\audio\vbcable_installer.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

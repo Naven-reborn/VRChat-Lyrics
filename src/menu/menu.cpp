@@ -96,6 +96,23 @@ namespace icons {
         dl->AddLine(ImVec2(c.x, c.y + s * 0.6f),
                     ImVec2(c.x, c.y + s * 0.85f), col, S(1.6f));
     }
+    static void DrawSpeaker(ImDrawList* dl, ImVec2 c, float size, ImU32 col) {
+        float s = size * 0.42f;
+        // Box (cabinet)
+        ImVec2 b0(c.x - s * 0.55f, c.y - s);
+        ImVec2 b1(c.x + s * 0.05f, c.y + s);
+        dl->AddRectFilled(b0, b1, col, S(1.5f));
+        // Cone (triangle pointing right)
+        dl->AddTriangleFilled(
+            ImVec2(c.x + s * 0.05f, c.y - s * 0.55f),
+            ImVec2(c.x + s * 0.05f, c.y + s * 0.55f),
+            ImVec2(c.x + s * 0.7f,  c.y), col);
+        // Two arc waves
+        dl->PathArcTo(ImVec2(c.x + s * 0.2f, c.y), s * 0.55f, -0.6f, 0.6f, 12);
+        dl->PathStroke(col, 0, S(1.4f));
+        dl->PathArcTo(ImVec2(c.x + s * 0.2f, c.y), s * 0.85f, -0.6f, 0.6f, 14);
+        dl->PathStroke(col, 0, S(1.4f));
+    }
     static void DrawSun(ImDrawList* dl, ImVec2 c, float size, ImU32 col) {
         float r = size * 0.28f;
         dl->AddCircle(c, r, col, 24, S(1.6f));
@@ -492,6 +509,223 @@ static void DrawActivity(State& s) {
     CardEnd();
 }
 
+static void DrawAudio(State& s) {
+    auto cstr_copy = [](char* dst, size_t cap, const char* src) {
+        if (!cap) return;
+        size_t i = 0;
+        while (i + 1 < cap && src[i]) { dst[i] = src[i]; ++i; }
+        dst[i] = 0;
+    };
+    SectionTitle(i18n::t("STATUS", "状态", "狀態"));
+    CardBegin("##card_audio_status");
+    ImGui::PushFont(font_body);
+    ImVec4 ok_col(0.40f, 0.86f, 0.50f, 1.f);
+    ImVec4 bad_col(0.85f, 0.55f, 0.30f, 1.f);
+
+    ImGui::TextColored(s.audio_netease_detected ? ok_col : bad_col,
+        s.audio_netease_detected
+            ? i18n::t("\xE2\x97\x8F Netease detected",
+                      "\xE2\x97\x8F \xE7\xBD\x91\xE6\x98\x93\xE4\xBA\x91\xE5\xB7\xB2\xE6\xA3\x80\xE6\xB5\x8B",
+                      "\xE2\x97\x8F \xE7\xB6\xB2\xE6\x98\x93\xE9\x9B\xB2\xE5\xB7\xB2\xE5\x81\xB5\xE6\xB8\xAC")
+            : i18n::t("\xE2\x97\x8B Netease not running",
+                      "\xE2\x97\x8B \xE7\xBD\x91\xE6\x98\x93\xE4\xBA\x91\xE6\x9C\xAA\xE8\xBF\x90\xE8\xA1\x8C",
+                      "\xE2\x97\x8B \xE7\xB6\xB2\xE6\x98\x93\xE9\x9B\xB2\xE6\x9C\xAA\xE9\x81\x8B\xE8\xA1\x8C"));
+    ImGui::TextColored(s.audio_vbcable_installed ? ok_col : bad_col,
+        s.audio_vbcable_installed
+            ? i18n::t("\xE2\x97\x8F VB-Cable installed",
+                      "\xE2\x97\x8F VB-Cable \xE5\xB7\xB2\xE5\xAE\x89\xE8\xA3\x85",
+                      "\xE2\x97\x8F VB-Cable \xE5\xB7\xB2\xE5\xAE\x89\xE8\xA3\x9D")
+            : i18n::t("\xE2\x97\x8B VB-Cable not installed",
+                      "\xE2\x97\x8B VB-Cable \xE6\x9C\xAA\xE5\xAE\x89\xE8\xA3\x85",
+                      "\xE2\x97\x8B VB-Cable \xE6\x9C\xAA\xE5\xAE\x89\xE8\xA3\x9D"));
+    if (s.audio_relay_running) {
+        ImGui::TextColored(ok_col, "\xE2\x97\x8F %s",
+            i18n::t("Relay running", "中继运行中", "中繼運行中"));
+    }
+    if (s.audio_status_text[0]) {
+        ImGui::TextColored(col::text_dim, "%s", s.audio_status_text);
+    }
+    ImGui::PopFont();
+    CardEnd();
+
+    // Install card — only shown when not installed.
+    if (!s.audio_vbcable_installed) {
+        SectionTitle(i18n::t("INSTALL VB-CABLE", "\xE5\xAE\x89\xE8\xA3\x85 VB-CABLE", "\xE5\xAE\x89\xE8\xA3\x9D VB-CABLE"));
+        CardBegin("##card_audio_install");
+        ImGui::PushFont(font_body);
+        ImGui::TextColored(col::text_dim, "%s",
+            i18n::t("VB-Cable is a free virtual audio cable driver. Click below to download and install automatically.",
+                    "VB-Cable \xE6\x98\xAF\xE5\x85\x8D\xE8\xB4\xB9\xE7\x9A\x84\xE8\x99\x9A\xE6\x8B\x9F\xE5\xA3\xB0\xE5\x8D\xA1\xE9\xA9\xB1\xE5\x8A\xA8\xE3\x80\x82\xE7\x82\xB9\xE5\x87\xBB\xE4\xB8\x8B\xE6\x96\xB9\xE8\x87\xAA\xE5\x8A\xA8\xE4\xB8\x8B\xE8\xBD\xBD\xE5\xAE\x89\xE8\xA3\x85\xE3\x80\x82",
+                    "VB-Cable \xE6\x98\xAF\xE5\x85\x8D\xE8\xB2\xBB\xE7\x9A\x84\xE8\x99\x9B\xE6\x93\xAC\xE8\x81\xB2\xE5\x8D\xA1\xE9\xA9\x85\xE5\x8B\x95\xE3\x80\x82\xE9\xBB\x9E\xE6\x93\x8A\xE4\xB8\x8B\xE6\x96\xB9\xE8\x87\xAA\xE5\x8B\x95\xE4\xB8\x8B\xE8\xBC\x89\xE5\xAE\x89\xE8\xA3\x9D\xE3\x80\x82"));
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0, S(6.f)));
+
+        bool busy = (s.audio_install_step >= 0 && s.audio_install_step <= 4);
+        if (!busy) {
+            float w = ImGui::GetContentRegionAvail().x;
+            ImGui::PushStyleColor(ImGuiCol_Button, col::accent);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                ImVec4(col::accent.x * 0.85f, col::accent.y * 0.85f, col::accent.z * 0.85f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.07f, 0.10f, 1.f));
+            ImGui::PushFont(font_medium);
+            const char* lbl = (s.audio_install_step == (int)6 /*Failed*/)
+                ? i18n::t("Retry install", "\xE9\x87\x8D\xE8\xAF\x95\xE5\xAE\x89\xE8\xA3\x85", "\xE9\x87\x8D\xE8\xA9\xA6\xE5\xAE\x89\xE8\xA3\x9D")
+                : i18n::t("Download and install", "\xE4\xB8\x8B\xE8\xBD\xBD\xE5\xB9\xB6\xE5\xAE\x89\xE8\xA3\x85", "\xE4\xB8\x8B\xE8\xBC\x89\xE4\xB8\xA6\xE5\xAE\x89\xE8\xA3\x9D");
+            if (ImGui::Button(lbl, ImVec2(w, S(34.f)))) {
+                s.audio_install_request = true;
+            }
+            ImGui::PopFont();
+            ImGui::PopStyleColor(4);
+        }
+
+        if (s.audio_install_step >= 0) {
+            ImGui::Dummy(ImVec2(0, S(6.f)));
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float w = ImGui::GetContentRegionAvail().x - S(14.f);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(p, ImVec2(p.x + w, p.y + S(6.f)), U32(col::bg_input), S(3.f));
+            float frac = 0.f;
+            switch (s.audio_install_step) {
+                case 0: frac = 0.10f + 0.30f * s.audio_install_fraction; break; // Downloading
+                case 1: frac = 0.50f; break; // Extracting
+                case 2: frac = 0.60f; break; // LaunchingInstaller
+                case 3: frac = 0.70f; break; // AwaitingUser
+                case 4: frac = 0.90f; break; // Verifying
+                case 5: frac = 1.00f; break; // Done
+                case 6: frac = s.audio_install_fraction; break; // Failed
+                default: break;
+            }
+            if (frac > 0.f) {
+                dl->AddRectFilled(p, ImVec2(p.x + w * frac, p.y + S(6.f)),
+                                  U32(s.audio_install_step == 6 ? ImVec4(0.85f, 0.45f, 0.40f, 1.f) : col::accent),
+                                  S(3.f));
+            }
+            ImGui::Dummy(ImVec2(w, S(8.f)));
+            ImGui::PushFont(font_caption);
+            ImGui::TextColored(col::text_dim, "%s",
+                s.audio_install_msg[0] ? s.audio_install_msg : "");
+            ImGui::PopFont();
+        }
+        CardEnd();
+    }
+
+    // Device selector
+    SectionTitle(i18n::t("OUTPUT DEVICE", "\xE8\xBE\x93\xE5\x87\xBA\xE8\xAE\xBE\xE5\xA4\x87", "\xE8\xBC\xB8\xE5\x87\xBA\xE8\xA3\x9D\xE7\xBD\xAE"));
+    CardBegin("##card_audio_device");
+    ImGui::PushFont(font_body);
+    ImGui::TextColored(col::text_dim, "%s",
+        i18n::t("Audio is routed to this device.",
+                "\xE9\x9F\xB3\xE9\xA2\x91\xE5\xB0\x86\xE5\x8F\x91\xE9\x80\x81\xE5\x88\xB0\xE6\xAD\xA4\xE8\xAE\xBE\xE5\xA4\x87\xE3\x80\x82",
+                "\xE9\x9F\xB3\xE9\xA0\xBB\xE5\xB0\x87\xE5\x82\xB3\xE9\x80\x81\xE5\x88\xB0\xE6\xAD\xA4\xE8\xA3\x9D\xE7\xBD\xAE\xE3\x80\x82"));
+    ImGui::PopFont();
+
+    // Build labels for combo
+    static const char* item_ptrs[16] = {};
+    static char        labels[16][140];
+    int  current_idx = -1;
+    int  vb_idx      = -1;
+    for (int i = 0; i < s.audio_device_count && i < 16; ++i) {
+        const char* tag = s.audio_devices[i].is_vbcable
+            ? i18n::t(" (recommended)", " (\xE6\x8E\xA8\xE8\x8D\x90)", " (\xE6\x8E\xA8\xE8\x96\xA6)")
+            : (s.audio_devices[i].is_default ? i18n::t(" (default)", " (\xE9\xBB\x98\xE8\xAE\xA4)", " (\xE9\xA0\x90\xE8\xA8\xAD)") : "");
+        _snprintf_s(labels[i], sizeof(labels[i]), _TRUNCATE,
+                    "%s%s", s.audio_devices[i].label, tag);
+        item_ptrs[i] = labels[i];
+        if (std::strcmp(s.audio_devices[i].id, s.audio_target_device_id) == 0) current_idx = i;
+        if (s.audio_devices[i].is_vbcable && vb_idx < 0) vb_idx = i;
+    }
+    if (current_idx < 0 && vb_idx >= 0) {
+        current_idx = vb_idx;
+        cstr_copy(s.audio_target_device_id,    sizeof(s.audio_target_device_id),    s.audio_devices[vb_idx].id);
+        cstr_copy(s.audio_target_device_label, sizeof(s.audio_target_device_label), s.audio_devices[vb_idx].label);
+    }
+    ImGui::SetNextItemWidth(-S(80.f));
+    if (s.audio_device_count > 0) {
+        if (ImGui::Combo("##audio_dev", &current_idx, item_ptrs, s.audio_device_count)) {
+            if (current_idx >= 0 && current_idx < s.audio_device_count) {
+                cstr_copy(s.audio_target_device_id,    sizeof(s.audio_target_device_id),    s.audio_devices[current_idx].id);
+                cstr_copy(s.audio_target_device_label, sizeof(s.audio_target_device_label), s.audio_devices[current_idx].label);
+            }
+        }
+    } else {
+        ImGui::TextColored(col::text_dim, "%s",
+            i18n::t("(no devices)", "(\xE6\x97\xA0\xE8\xAE\xBE\xE5\xA4\x87)", "(\xE7\x84\xA1\xE8\xA3\x9D\xE7\xBD\xAE)"));
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(i18n::t("Refresh", "\xE5\x88\xB7\xE6\x96\xB0", "\xE5\x88\xB7\xE6\x96\xB0"), ImVec2(S(70.f), 0))) {
+        s.audio_refresh_request = true;
+    }
+    CardEnd();
+
+    // Relay controls
+    SectionTitle(i18n::t("RELAY", "\xE4\xB8\xAD\xE7\xBB\xA7", "\xE4\xB8\xAD\xE7\xB9\xBC"));
+    CardBegin("##card_audio_relay");
+    const char* btn_label = s.audio_relay_running
+        ? i18n::t("Stop relay", "\xE5\x81\x9C\xE6\xAD\xA2\xE4\xB8\xAD\xE7\xBB\xA7", "\xE5\x81\x9C\xE6\xAD\xA2\xE4\xB8\xAD\xE7\xB9\xBC")
+        : i18n::t("Start relay", "\xE5\x90\xAF\xE5\x8A\xA8\xE4\xB8\xAD\xE7\xBB\xA7", "\xE5\x95\x9F\xE5\x8B\x95\xE4\xB8\xAD\xE7\xB9\xBC");
+    float btn_w = ImGui::GetContentRegionAvail().x;
+    float btn_h = S(36.f);
+    bool can_start = s.audio_vbcable_installed && s.audio_netease_detected && s.audio_target_device_id[0];
+    ImGui::PushStyleColor(ImGuiCol_Button,
+        s.audio_relay_running ? ImVec4(0.65f, 0.25f, 0.30f, 1.f)
+                              : (can_start ? col::accent : ImVec4(0.30f, 0.34f, 0.40f, 1.f)));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+        s.audio_relay_running ? ImVec4(0.78f, 0.30f, 0.35f, 1.f) :
+        (can_start ? ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f)
+                   : ImVec4(0.32f, 0.36f, 0.42f, 1.f)));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+        s.audio_relay_running ? ImVec4(0.55f, 0.20f, 0.25f, 1.f) :
+        ImVec4(col::accent.x * 0.85f, col::accent.y * 0.85f, col::accent.z * 0.85f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.07f, 0.10f, 1.f));
+    ImGui::PushFont(font_medium);
+    if (ImGui::Button(btn_label, ImVec2(btn_w, btn_h))) {
+        if (s.audio_relay_running) s.audio_stop_request = true;
+        else if (can_start)        s.audio_start_request = true;
+    }
+    ImGui::PopFont();
+    ImGui::PopStyleColor(4);
+
+    ImGui::Dummy(ImVec2(0, S(4.f)));
+    {
+        int v = (int)std::round(s.audio_gain_db * 10.f);
+        if (NLSliderInt(i18n::t("Gain (dB x10)", "\xE5\xA2\x9E\xE7\x9B\x8A (dB x10)", "\xE5\xA2\x9E\xE7\x9B\x8A (dB x10)"), &v, -120, 120)) {
+            s.audio_gain_db = (float)v / 10.f;
+        }
+    }
+    NLToggle(i18n::t("Limiter (prevent clipping)", "\xE9\x99\x90\xE5\xB9\x85\xE5\x99\xA8\xEF\xBC\x88\xE9\x98\xB2\xE7\x88\x86\xE9\x9F\xB3\xEF\xBC\x89", "\xE9\x99\x90\xE5\xB9\x85\xE5\x99\xA8\xEF\xBC\x88\xE9\x98\xB2\xE7\x88\x86\xE9\x9F\xB3\xEF\xBC\x89"),
+             &s.audio_limiter);
+    NLToggle(i18n::t("Auto-start when Netease plays", "\xE7\xBD\x91\xE6\x98\x93\xE4\xBA\x91\xE6\x92\xAD\xE6\x94\xBE\xE6\x97\xB6\xE8\x87\xAA\xE5\x8A\xA8\xE5\x90\xAF\xE5\x8A\xA8", "\xE7\xB6\xB2\xE6\x98\x93\xE9\x9B\xB2\xE6\x92\xAD\xE6\x94\xBE\xE6\x99\x82\xE8\x87\xAA\xE5\x8B\x95\xE5\x95\x9F\xE5\x8B\x95"),
+             &s.audio_autostart);
+
+    // Peak meter
+    ImGui::Dummy(ImVec2(0, S(6.f)));
+    ImGui::PushFont(font_caption);
+    ImGui::TextColored(col::text_dim, "%s %.1f dBFS",
+        i18n::t("Peak", "\xE5\xB3\xB0\xE5\x80\xBC", "\xE5\xB3\xB0\xE5\x80\xBC"),
+        s.audio_peak_dbfs);
+    ImGui::PopFont();
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float w = ImGui::GetContentRegionAvail().x - S(14.f);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + S(4.f)), U32(col::bg_input), S(2.f));
+        // Map -60..0 dB to 0..1
+        float peak = s.audio_peak_dbfs;
+        float frac = (peak + 60.f) / 60.f;
+        if (frac < 0.f) frac = 0.f; if (frac > 1.f) frac = 1.f;
+        ImVec4 meter_col = col::accent;
+        if (peak > -6.f) meter_col = ImVec4(0.85f, 0.55f, 0.30f, 1.f);
+        if (peak > -1.f) meter_col = ImVec4(0.85f, 0.30f, 0.35f, 1.f);
+        if (frac > 0.f) {
+            dl->AddRectFilled(p, ImVec2(p.x + w * frac, p.y + S(4.f)), U32(meter_col), S(2.f));
+        }
+        ImGui::Dummy(ImVec2(w, S(6.f)));
+    }
+    CardEnd();
+}
+
 static void DrawSettings(State& s) {
     SectionTitle(i18n::t("APPEARANCE", "外观", "外觀"));
     CardBegin("##card_app");
@@ -593,6 +827,7 @@ void Draw(State& s, int win_w, int win_h) {
     Tab clicked_tab = s.current_tab;
     if (SidebarTab(i18n::t("Lyrics",   "歌词", "歌詞"), icons::DrawMusic,     s.current_tab == Tab::Lyrics))   clicked_tab = Tab::Lyrics;
     if (SidebarTab(i18n::t("Activity", "应用", "應用"), icons::DrawAppWindow, s.current_tab == Tab::Activity)) clicked_tab = Tab::Activity;
+    if (SidebarTab(i18n::t("Audio",    "\xE9\x9F\xB3\xE9\xA2\x91", "\xE9\x9F\xB3\xE9\xA0\xBB"), icons::DrawSpeaker, s.current_tab == Tab::Audio)) clicked_tab = Tab::Audio;
     if (SidebarTab(i18n::t("Settings", "设置", "設定"), icons::DrawGear,      s.current_tab == Tab::Settings)) clicked_tab = Tab::Settings;
 
     if (clicked_tab != s.current_tab) {
@@ -713,6 +948,7 @@ void Draw(State& s, int win_w, int win_h) {
     switch (s.current_tab) {
         case Tab::Lyrics:   DrawLyrics(s);   break;
         case Tab::Activity: DrawActivity(s); break;
+        case Tab::Audio:    DrawAudio(s);    break;
         case Tab::Settings: DrawSettings(s); break;
     }
 

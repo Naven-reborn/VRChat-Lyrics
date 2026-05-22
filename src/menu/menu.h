@@ -4,7 +4,7 @@
 
 namespace menu {
 
-enum class Tab { Lyrics = 0, Activity = 1, Settings = 2 };
+enum class Tab { Lyrics = 0, Activity = 1, Audio = 2, Settings = 3 };
 
 struct State {
     Tab current_tab = Tab::Lyrics;
@@ -53,6 +53,37 @@ struct State {
     char fmt_lyrics[256]    = "{status} {name} - {artist}\n{mic} {lyrics}";
     char fmt_no_lyrics[256] = "{status} {name} - {artist}";
     char fmt_paused[256]    = "{status} {name} - {artist}";
+
+    // Audio relay tab — most fields are runtime-only; only the four marked
+    // (*) are persisted by config.cpp.
+    bool  audio_vbcable_installed = false;
+    bool  audio_netease_detected  = false;
+    bool  audio_relay_running     = false;
+    char  audio_target_device_id[256] = "";   // (*) UTF-8 of wide endpoint id
+    char  audio_target_device_label[128] = "";
+    float audio_gain_db = -6.f;               // (*) -6 dB default leaves headroom for VRChat Opus
+    bool  audio_limiter = true;               // (*) on by default — last-line brick wall, not a compressor
+    bool  audio_autostart = false;            // (*)
+    char  audio_status_text[128] = "";
+    float audio_peak_dbfs = -120.f;
+    bool  audio_install_request = false;
+    bool  audio_start_request   = false;
+    bool  audio_stop_request    = false;
+    bool  audio_refresh_request = false;
+    int   audio_install_step    = -1;  // matches audio::InstallStep
+    float audio_install_fraction = 0.f;
+    char  audio_install_msg[128] = "";
+
+    // Render device list populated by main.cpp every ~2s. Decoupled from
+    // audio/devices.h so menu.cpp doesn't pull in COM headers.
+    struct AudioDeviceUI {
+        char id[256];
+        char label[128];
+        bool is_vbcable;
+        bool is_default;
+    };
+    AudioDeviceUI audio_devices[16] = {};
+    int           audio_device_count = 0;
 };
 
 void Draw(State& s, int win_w, int win_h);
