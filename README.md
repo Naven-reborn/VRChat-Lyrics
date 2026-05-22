@@ -148,6 +148,15 @@ src/
 ├── osc/                        # VRChat OSC
 │   ├── osc_message.{h,cpp}     # OSC 1.0 编码
 │   └── chatbox.{h,cpp}         # UDP + rate limit + 去重
+├── audio/                      # 音频中继(v2.0 新增)
+│   ├── ring_buffer.h           # SPSC 环形缓冲(32KB,2 的幂次 mask)
+│   ├── limiter.{h,cpp}         # 增益 + 硬限幅(线性区透传,触顶时介入)
+│   ├── process_find.{h,cpp}    # toolhelp 找网易云根 PID
+│   ├── devices.{h,cpp}         # MMDevice 枚举 + VB-Cable 检测
+│   ├── process_loopback.{h,cpp}# WASAPI 进程级 loopback(Win10 20348+)
+│   ├── wasapi_render.{h,cpp}   # shared mode + AUTOCONVERTPCM 渲染
+│   ├── relay.{h,cpp}           # 工作线程编排 + 状态发布
+│   └── vbcable_installer.{h,cpp}# 自动下载/解压/拉起 VB-Cable 安装器
 ├── net/winhttp_client.{h,cpp}  # WinHTTP 同步 GET
 ├── util/
 │   ├── image.{h,cpp}           # WIC 解码 + 圆形 alpha 蒙版 + D3D11 上传
