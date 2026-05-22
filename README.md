@@ -3,6 +3,7 @@
 # VRChat Lyrics
 
 **网易云歌词 → VRChat chatbox 实时推送**
+**v2.0:网易云音频 → VRChat 麦克风(进程级 loopback + VB-Cable)**
 
 C++ + ImGui · 中英繁三语 · 暗亮主题
 
@@ -22,6 +23,12 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
   直连网易云公开 API,带翻译可选合并,LRCLib 作 fallback。
 - 🎤 **OSC 实时推送 VRChat chatbox**
   支持自定义模板,有速率限制不会触发 chatbox 风控。
+- 🔊 **音频中继到 VRChat 麦克风(v2.0 新增)**
+  WASAPI 进程级 loopback 只抓网易云的音频,不会把 VRChat / Discord / 系统声音一起送出去。通过 VB-Cable 虚拟声卡接入 VRChat 麦克风,房间里其他人能直接听到你的音乐。
+- 📦 **一键自动下载安装 VB-Cable(v2.0 新增)**
+  程序内点 "下载并安装" → 自动下载官方驱动包 → 解压 → 拉起 UAC 安装器 → 自动验证,无需手动折腾。
+- 🎚 **增益 + 硬限幅器(v2.0 新增)**
+  防爆音兜底,线性区完全透传,只在快爆音时介入。带实时峰值表。
 - 🎮 **附加当前前台应用**
   打游戏时自动加上"🎮 VRChat · 🎵 ...",别人能看到你在干啥。
 - 💿 **旋转专辑封面**
@@ -62,6 +69,15 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
 4. 点 **Start**,VRChat chatbox 出现 "▶️ 歌名 - 艺人\n🎤 当前歌词"
 5. 点关闭按钮藏到托盘,服务继续后台运行;托盘右键 Exit 才真退出
 
+### (可选)启用音频中继,让朋友听到你的音乐
+
+1. 切到 **音频** 标签页
+2. 如果没装过 VB-Cable,点 **"下载并安装"** → UAC 同意 → 等自动检测完成(个别 Win11 24H2 可能要求重启)
+3. **输出设备** 自动推荐 `CABLE Input`
+4. 点 **"启动中继"**(默认 -6 dB 增益 + 硬限幅,留 headroom 给 VRChat 编码)
+5. VRChat → Settings → 麦克风改成 **`CABLE Output`**
+6. 房间里其他人能直接听到你在听的歌了 🎉
+
 ## 🔧 自己编译
 
 ### 环境
@@ -90,6 +106,8 @@ build.bat Debug
 也可以直接 VS 打开 `vrc-lyrics.sln` F5 调试。
 
 ## 🧠 它怎么工作
+
+**歌词链路**
 
 ```
 ┌─────────────────┐                                ┌──────────────────┐
@@ -120,6 +138,44 @@ build.bat Debug
                           ┌─────────────────────────┐
                           │       VRChat            │
                           └─────────────────────────┘
+```
+
+**音频中继链路(v2.0 新增)**
+
+```
+┌────────────────────────┐
+│ 网易云 cloudmusic.exe   │     audio::process_find  (toolhelp 找根 PID)
+└─────────────┬──────────┘
+              │ 系统音频
+              ↓
+   ┌─────────────────────────────────┐
+   │ audio::ProcessLoopbackCapture   │  WASAPI ActivateAudioInterfaceAsync
+   │ INCLUDE_TARGET_PROCESS_TREE     │  AUDIOCLIENT_ACTIVATION_PARAMS
+   │ 只抓网易云,不抓 VRChat/Discord │  Win10 build 20348+
+   └────────────┬────────────────────┘
+                │ float32 stereo 48k
+                ↓
+   ┌─────────────────────────┐
+   │ audio::RingBuffer       │  SPSC 32KB,2 的幂次 mask,drop-oldest
+   └────────────┬────────────┘
+                ↓
+   ┌─────────────────────────┐
+   │ audio::SoftLimiter      │  增益(默认 -6 dB)+ 硬限幅(ceiling -3 dBFS)
+   │ + peak 计量             │  线性区透传,触顶时介入
+   └────────────┬────────────┘
+                ↓
+   ┌─────────────────────────┐
+   │ audio::WasapiRender     │  shared mode + AUTOCONVERTPCM + EVENTCALLBACK
+   │ 目标: CABLE Input       │  AvSetMmThreadCharacteristics("Pro Audio")
+   └────────────┬────────────┘
+                ↓
+   ┌─────────────────────────┐
+   │ VB-Cable 虚拟声卡       │  CABLE Input → CABLE Output(免费驱动,程序内自动装)
+   └────────────┬────────────┘
+                ↓
+   ┌─────────────────────────┐
+   │  VRChat 麦克风设备       │  Opus 编码 → 房间里其他人能听到
+   └─────────────────────────┘
 ```
 
 ## 📂 项目结构
@@ -177,6 +233,9 @@ deps/
 - **C++/WinRT** 调 SMTC(`GlobalSystemMediaTransportControlsSessionManager`)
 - **WinHTTP** + **nlohmann/json** 拉网易云歌词
 - **WIC** 解码封面 JPEG/PNG
+- **WASAPI 进程级 loopback**(`ActivateAudioInterfaceAsync` + `AUDIOCLIENT_ACTIVATION_PARAMS`,Win10 20348+)抓网易云音频
+- **VB-Audio Virtual Cable** 作虚拟麦克风桥接,程序内自动下载安装
+- **AvRT** (`AvSetMmThreadCharacteristics("Pro Audio")`) 提升音频线程调度优先级
 - **微软雅黑** 作 CJK fallback,主字体 MuseoSans
 - **DWM** 阴影 + 直角窗口(关圆角)
 - **DPI Per-Monitor V2** 感知
@@ -197,6 +256,10 @@ deps/
 | `show_foreground_app` | bool | chatbox 前缀加前台应用名 |
 | `send_while_paused` | bool | 暂停时仍发送 |
 | `fmt_lyrics`/`fmt_no_lyrics`/`fmt_paused` | string | chatbox 模板 |
+| `audio_target_device_id` | string | 音频中继目标设备 ID(选 VB-Cable 时自动填) |
+| `audio_gain_db` | float | 中继增益(dB),默认 -6,留 headroom 给 VRChat Opus |
+| `audio_limiter` | bool | 硬限幅器开关,默认开(ceiling -3 dBFS,线性区透传) |
+| `audio_autostart` | bool | 网易云一开播就自动启动中继 |
 
 ## ⚠ 已知问题
 
@@ -204,11 +267,17 @@ deps/
 - **MuseoSans 是商业字体**,本仓库附带的 TTF 字节数组仅供个人构建测试使用,**公开发布前请替换为开源字体**(如 Inter / Manrope,用 `binary_to_compressed_c.cpp` 转 .h)。
 - 切歌瞬间偶尔会有 200ms 左右的歌词空窗(等 HTTP 请求返回),正常现象。
 - 没装 inflink-rs 的话,SMTC 拿不到 NCM-ID,歌词模块拿不到 ID 就不工作。
+- **音频中继**仅在 **私人/朋友房间** 使用 — 公共房间外放音乐通常被视为骚扰,可能被举报封号。
+- **音频中继需 Windows 10 build 20348+ / Windows 11**(进程级 loopback API 要求)。
+- VB-Cable 首次安装后,**个别 Win11 24H2 机器可能需要重启** 才能识别新设备。
+- 整条音频链路最终经过 VRChat 的 Opus 编码,会引入有损压缩,**听众端音质会比本地播放差一些**,属正常现象。
+- 升级 v1.0 → v2.0 时,旧 `config.json` 没有音频字段,会走新默认值(-6 dB / limiter 开)。
 
 ## 🙏 鸣谢
 
 - [**BigAtomikku/VRC-Lyrics**](https://github.com/BigAtomikku/VRC-Lyrics) — 原 Python 项目,提供功能蓝本
 - [**apoint123/inflink-rs**](https://github.com/apoint123/inflink-rs) — 让外部程序能读到网易云的关键桥梁
+- [**VB-Audio Software**](https://vb-audio.com/Cable/) — 免费虚拟声卡驱动(v2.0 音频中继依赖)
 - [**ocornut/imgui**](https://github.com/ocornut/imgui) — Dear ImGui
 - [**nlohmann/json**](https://github.com/nlohmann/json) — JSON for Modern C++
 
