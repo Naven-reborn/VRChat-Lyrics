@@ -4,6 +4,7 @@
 
 **网易云歌词 → VRChat chatbox 实时推送**
 **v2.0:网易云音频 → VRChat 麦克风(进程级 loopback + VB-Cable)**
+**v3.0:Bilibili 视频解析直链 + 音频中继音质修复**
 
 C++ + ImGui · 中英繁三语 · 暗亮主题
 
@@ -27,8 +28,10 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
   WASAPI 进程级 loopback 只抓网易云的音频,不会把 VRChat / Discord / 系统声音一起送出去。通过 VB-Cable 虚拟声卡接入 VRChat 麦克风,房间里其他人能直接听到你的音乐。
 - 📦 **一键自动下载安装 VB-Cable(v2.0 新增)**
   程序内点 "下载并安装" → 自动下载官方驱动包 → 解压 → 拉起 UAC 安装器 → 自动验证,无需手动折腾。
-- 🎚 **增益 + 硬限幅器(v2.0 新增)**
-  防爆音兜底,线性区完全透传,只在快爆音时介入。带实时峰值表。
+- 🎚 **增益 + 硬限幅器(v2.0 新增 / v3.0 升级)**
+  防爆音兜底,线性区完全透传,只在快爆音时介入。v3.0 把硬切换成 15% knee + tanh 渐进,消除给 Opus "添乱" 的奇次谐波。带实时峰值表。
+- 🎬 **Bilibili 视频解析 → VRChat 视频播放器(v3.0 新增)**
+  贴 BV 号 / 完整 bilibili 链接 / b23.tv 短链,一键解析出能直接丢进 VRChat 视频播放器的 1440P (2K) 直链。本地 WinHTTP 直连官方 API,不走第三方中转。
 - 🎮 **附加当前前台应用**
   打游戏时自动加上"🎮 VRChat · 🎵 ...",别人能看到你在干啥。
 - 💿 **旋转专辑封面**
@@ -74,9 +77,21 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
 1. 切到 **音频** 标签页
 2. 如果没装过 VB-Cable,点 **"下载并安装"** → UAC 同意 → 等自动检测完成(个别 Win11 24H2 可能要求重启)
 3. **输出设备** 自动推荐 `CABLE Input`
-4. 点 **"启动中继"**(默认 -6 dB 增益 + 硬限幅,留 headroom 给 VRChat 编码)
+4. 点 **"启动中继"**(默认 -3 dB 增益 + 软限幅,给 VRChat 编码留 headroom)
 5. VRChat → Settings → 麦克风改成 **`CABLE Output`**
-6. 房间里其他人能直接听到你在听的歌了 🎉
+6. **(v3.0 强烈推荐)** VRChat → Settings → Audio & Voice → **Voice Processing 改成 None** —— VRChat 默认对麦克风做降噪,会把音乐高频削掉,音质听起来"闷"。关掉这个之后音质会有质的提升
+7. 房间里其他人能直接听到你在听的歌了 🎉
+
+### (可选)Bilibili 视频解析(v3.0 新增)
+
+1. 切到 **视频** 标签页
+2. 在输入框里粘贴下面任意一种格式:
+   - 裸 BV 号:`BV1xx411c7mu`
+   - 完整链接:`https://www.bilibili.com/video/BV1xx411c7mu`
+   - b23.tv 短链:`https://b23.tv/abcdef`
+3. 点 **解析**,几百毫秒后下面卡片显示视频标题 + 1440P 直链
+4. 点 **复制链接**,丢进 VRChat 房间里的视频播放器 URL 输入框
+5. 解析出来的链接是带签名的 CDN 直链,**有效期 ~2 小时**,过期需重新解析
 
 ## 🔧 自己编译
 
@@ -204,16 +219,18 @@ src/
 ├── osc/                        # VRChat OSC
 │   ├── osc_message.{h,cpp}     # OSC 1.0 编码
 │   └── chatbox.{h,cpp}         # UDP + rate limit + 去重
-├── audio/                      # 音频中继(v2.0 新增)
+├── audio/                      # 音频中继(v2.0 新增 / v3.0 修 bug + 软限幅)
 │   ├── ring_buffer.h           # SPSC 环形缓冲(32KB,2 的幂次 mask)
-│   ├── limiter.{h,cpp}         # 增益 + 硬限幅(线性区透传,触顶时介入)
+│   ├── limiter.{h,cpp}         # 增益 + 软限幅(v3.0: 15% knee + tanh,无硬切)
 │   ├── process_find.{h,cpp}    # toolhelp 找网易云根 PID
 │   ├── devices.{h,cpp}         # MMDevice 枚举 + VB-Cable 检测
-│   ├── process_loopback.{h,cpp}# WASAPI 进程级 loopback(Win10 20348+)
+│   ├── process_loopback.{h,cpp}# WASAPI 进程级 loopback(Win10 20348+, v3.0: 修包丢失 bug)
 │   ├── wasapi_render.{h,cpp}   # shared mode + AUTOCONVERTPCM 渲染
-│   ├── relay.{h,cpp}           # 工作线程编排 + 状态发布
+│   ├── relay.{h,cpp}           # 工作线程编排 + 状态发布(v3.0: 修队列错位 bug)
 │   └── vbcable_installer.{h,cpp}# 自动下载/解压/拉起 VB-Cable 安装器
-├── net/winhttp_client.{h,cpp}  # WinHTTP 同步 GET
+├── bilibili/                   # Bilibili 视频解析(v3.0 新增)
+│   └── parser.{h,cpp}          # BV/URL/b23.tv → web-interface/view → playurl → CDN 直链
+├── net/winhttp_client.{h,cpp}  # WinHTTP 同步 GET + 不跟随重定向版(v3.0 加,b23.tv 用)
 ├── util/
 │   ├── image.{h,cpp}           # WIC 解码 + 圆形 alpha 蒙版 + D3D11 上传
 │   └── foreground.{h,cpp}      # 前台应用名识别
@@ -257,8 +274,8 @@ deps/
 | `send_while_paused` | bool | 暂停时仍发送 |
 | `fmt_lyrics`/`fmt_no_lyrics`/`fmt_paused` | string | chatbox 模板 |
 | `audio_target_device_id` | string | 音频中继目标设备 ID(选 VB-Cable 时自动填) |
-| `audio_gain_db` | float | 中继增益(dB),默认 -6,留 headroom 给 VRChat Opus |
-| `audio_limiter` | bool | 硬限幅器开关,默认开(ceiling -3 dBFS,线性区透传) |
+| `audio_gain_db` | float | 中继增益(dB),v3.0 默认从 -6 升到 -3(VRChat 没有自动音量,信号热一点 Opus 信噪比好) |
+| `audio_limiter` | bool | 软限幅器开关,默认开(ceiling -3 dBFS,15% knee tanh,线性区透传) |
 | `audio_autostart` | bool | 网易云一开播就自动启动中继 |
 
 ## ⚠ 已知问题
@@ -270,14 +287,17 @@ deps/
 - **音频中继**仅在 **私人/朋友房间** 使用 — 公共房间外放音乐通常被视为骚扰,可能被举报封号。
 - **音频中继需 Windows 10 build 20348+ / Windows 11**(进程级 loopback API 要求)。
 - VB-Cable 首次安装后,**个别 Win11 24H2 机器可能需要重启** 才能识别新设备。
-- 整条音频链路最终经过 VRChat 的 Opus 编码,会引入有损压缩,**听众端音质会比本地播放差一些**,属正常现象。
-- 升级 v1.0 → v2.0 时,旧 `config.json` 没有音频字段,会走新默认值(-6 dB / limiter 开)。
+- 整条音频链路最终经过 VRChat 的 Opus 编码,会引入有损压缩,**听众端音质会比本地播放差一些**,属正常现象。**v3.0 起在 Audio 标签里给了一张"音质建议"卡片** —— 关掉 VRChat 的 Voice Processing 能挽回大半高频损失。
+- 升级 v1.0 → v2.0 / v3.0 时,旧 `config.json` 没有新字段,会走新默认值。v3.0 还把音频默认增益从 -6 dB 改成 -3 dB。
+- **Bilibili 视频解析(v3.0)** 拿到的是带签名的 CDN 直链,**有效期 ~2 小时**,过期得重解析;部分需要登录/大会员才能看 1440P 的视频,会自动回落到可用的最高质量;番剧(`ss12345`)只能播部分免费片段。
 
 ## 🙏 鸣谢
 
 - [**BigAtomikku/VRC-Lyrics**](https://github.com/BigAtomikku/VRC-Lyrics) — 原 Python 项目,提供功能蓝本
 - [**apoint123/inflink-rs**](https://github.com/apoint123/inflink-rs) — 让外部程序能读到网易云的关键桥梁
 - [**VB-Audio Software**](https://vb-audio.com/Cable/) — 免费虚拟声卡驱动(v2.0 音频中继依赖)
+- [**wangure0329/bilibili_parse_vrchat**](https://github.com/wangure0329/bilibili_parse_vrchat) — Bilibili 解析接口的参考实现(v3.0 视频解析依据)
+- [**SocialSisterYi/bilibili-API-collect**](https://github.com/SocialSisterYi/bilibili-API-collect) — Bilibili API 文档
 - [**ocornut/imgui**](https://github.com/ocornut/imgui) — Dear ImGui
 - [**nlohmann/json**](https://github.com/nlohmann/json) — JSON for Modern C++
 
