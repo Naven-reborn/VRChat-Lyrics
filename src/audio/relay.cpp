@@ -150,8 +150,10 @@ void Relay::WorkerEntry(RelayConfig cfg) {
     SoftLimiter limiter;
     limiter.Configure(-3.0f, limiter_.load());
 
-    // Scratch buffer for one pull (max ~50ms = 2400 frames).
-    std::vector<float> scratch(kFmtSampleRate / 10 * kFmtChannels, 0.f); // 100ms headroom
+    // Scratch buffer for one pull. WASAPI loopback packets can be up to the
+    // full client buffer (200ms requested above) when the engine bursts —
+    // size scratch to 500ms so Pull() never has to leave a packet behind.
+    std::vector<float> scratch(kFmtSampleRate / 2 * kFmtChannels, 0.f); // 500ms headroom
 
     publish([&](RelayStatus& st) {
         st.running   = true;
@@ -167,6 +169,12 @@ void Relay::WorkerEntry(RelayConfig cfg) {
 
     auto last_alive_check = std::chrono::steady_clock::now();
     uint32_t pid = netease->root_pid;
+
+    // 如果 render.Push 没塞完一整块,剩下的样本必须留在这里,而不能写回 ring ——
+    // 写回 ring 会插到队尾,跟队首正排队的新样本撞顺序,产生 ms 级时序错位
+    // (听感是细微的嘶/沙音)。这里 stash 保持原始顺序,下一帧优先推 stash。
+    std::vector<float> render_stash;
+    render_stash.reserve(kFmtSampleRate / 10 * kFmtChannels); // ~100ms reserve
 
     bool fatal = false;
 
@@ -207,33 +215,44 @@ void Relay::WorkerEntry(RelayConfig cfg) {
         }
         if (fatal) break;
 
-        // Drain ring into render until either ring empty or render full.
-        for (;;) {
-            uint32_t free_frames = 0;
-            // We don't have a direct "GetCurrentPadding" exposed; just try
-            // a small chunk and let Push report what it took.
+        // Drain stash first, then ring, into render — both stop on render-full.
+        // 顺序很重要:stash 是上一帧没塞完的"最早"样本,必须优先于 ring 里的新样本。
+        bool render_full = false;
+        if (!render_stash.empty()) {
+            uint32_t lf_frames = (uint32_t)(render_stash.size() / kFmtChannels);
+            bool ok2 = true;
+            uint32_t pushed = render.Push(render_stash.data(), lf_frames, ok2, err);
+            if (!ok2) { set_error("Render: " + err); fatal = true; break; }
+            if (pushed < lf_frames) {
+                size_t kept = (size_t)(lf_frames - pushed) * kFmtChannels;
+                std::memmove(render_stash.data(),
+                             render_stash.data() + (size_t)pushed * kFmtChannels,
+                             kept * sizeof(float));
+                render_stash.resize(kept);
+                render_full = true;
+            } else {
+                render_stash.clear();
+            }
+        }
+        while (!render_full) {
             constexpr uint32_t kChunk = 480; // 10ms @ 48k
             float tmp[kChunk * kFmtChannels];
-            size_t want_bytes = sizeof(tmp);
-            size_t got_bytes = ring.Read(tmp, want_bytes);
+            size_t got_bytes = ring.Read(tmp, sizeof(tmp));
             if (got_bytes == 0) break;
             uint32_t got_frames = (uint32_t)(got_bytes / (kFmtChannels * sizeof(float)));
 
-            bool ok = true;
-            uint32_t pushed = render.Push(tmp, got_frames, ok, err);
-            if (!ok) {
-                set_error("Render: " + err);
-                fatal = true;
-                break;
-            }
+            bool ok2 = true;
+            uint32_t pushed = render.Push(tmp, got_frames, ok2, err);
+            if (!ok2) { set_error("Render: " + err); fatal = true; break; }
             if (pushed < got_frames) {
-                // Render buffer full — push back the unwritten tail.
-                size_t leftover_bytes = ((size_t)got_frames - pushed) * kFmtChannels * sizeof(float);
-                ring.Write(tmp + pushed * kFmtChannels, leftover_bytes);
-                break;
+                // 渲染满了:把没推完的尾巴存进 stash,保持原顺序,下一帧先推。
+                size_t kept = (size_t)(got_frames - pushed) * kFmtChannels;
+                render_stash.assign(tmp + (size_t)pushed * kFmtChannels,
+                                    tmp + (size_t)pushed * kFmtChannels + kept);
+                render_full = true;
             }
-            (void)free_frames;
         }
+        if (fatal) break;
 
         // Periodically verify the target process is still alive (catches
         // cases where capture doesn't surface RESOURCES_INVALIDATED quickly).

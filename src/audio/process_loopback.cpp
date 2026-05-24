@@ -196,17 +196,22 @@ uint32_t ProcessLoopbackCapture::Pull(float* dst, uint32_t max_frames,
                    hr);
             return written;
         }
-        uint32_t take = frames;
-        if (written + take > max_frames) take = max_frames - written;
-
-        const size_t bytes = (size_t)take * channels_ * sizeof(float);
+        // WASAPI 不允许部分消费一个包。要么整包 ReleaseBuffer(frames),要么 (0)
+        // 把这一包留给下一次 GetBuffer 处理。早先的代码 take = max_frames - written
+        // 之后还 ReleaseBuffer(frames),WASAPI 把整包标记为已读 —— 等于把 frames-take
+        // 那段音频静悄悄丢了,造成启动时的爆音/中断。
+        if (written + frames > max_frames) {
+            capture_->ReleaseBuffer(0);
+            break;
+        }
+        const size_t bytes = (size_t)frames * channels_ * sizeof(float);
         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
             std::memset(dst + (size_t)written * channels_, 0, bytes);
         } else {
             std::memcpy(dst + (size_t)written * channels_, data, bytes);
             silent = false;
         }
-        written += take;
+        written += frames;
         capture_->ReleaseBuffer(frames);
 
         if (FAILED(capture_->GetNextPacketSize(&next))) break;

@@ -4,7 +4,7 @@
 
 namespace menu {
 
-enum class Tab { Lyrics = 0, Activity = 1, Audio = 2, Settings = 3 };
+enum class Tab { Lyrics = 0, Activity = 1, Audio = 2, Video = 3, Settings = 4 };
 
 struct State {
     Tab current_tab = Tab::Lyrics;
@@ -61,7 +61,7 @@ struct State {
     bool  audio_relay_running     = false;
     char  audio_target_device_id[256] = "";   // (*) UTF-8 of wide endpoint id
     char  audio_target_device_label[128] = "";
-    float audio_gain_db = -6.f;               // (*) -6 dB default leaves headroom for VRChat Opus
+    float audio_gain_db = -3.f;               // (*) -3 dB default — hotter signal helps Opus SNR through VRChat's voice codec
     bool  audio_limiter = true;               // (*) on by default — last-line brick wall, not a compressor
     bool  audio_autostart = false;            // (*)
     char  audio_status_text[128] = "";
@@ -84,6 +84,18 @@ struct State {
     };
     AudioDeviceUI audio_devices[16] = {};
     int           audio_device_count = 0;
+
+    // Video parser tab. main.cpp 拉一个 worker 跑 bilibili::Parse,
+    // 解析期间 video_status=1,完成后填 video_result_url + video_status=2/3。
+    char  video_input[512]      = "";    // 用户输入(BV / URL / b23.tv)
+    char  video_result_url[4096]= "";    // 最终直链,UI 显示 + 复制用
+    char  video_result_title[256]= "";   // 视频标题
+    char  video_result_meta[128] = "";   // "1440P · DASH · upos-sz-..."
+    char  video_error[128]      = "";    // 失败时的本地化提示
+    int   video_status          = 0;     // 0=idle 1=parsing 2=ok 3=error
+    bool  video_parse_request   = false;
+    bool  video_copy_request    = false;
+    float video_copy_toast_sec  = 0.f;   // 复制成功 toast 倒计时
 };
 
 void Draw(State& s, int win_w, int win_h);

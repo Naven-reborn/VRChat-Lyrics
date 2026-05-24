@@ -15,6 +15,7 @@
 #include "audio/devices.h"
 #include "audio/process_find.h"
 #include "audio/vbcable_installer.h"
+#include "bilibili/parser.h"
 #include "imgui.h"
 
 #include <d3d11.h>
@@ -130,6 +131,42 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         std::atomic<bool>  running{ false };
     };
     auto install_state = std::make_shared<InstallState>();
+
+    // Bilibili 解析:同样的"worker 写 atomic+mutex,主循环每帧镜像到 menu_state"模式。
+    // 用 shared_ptr 让 detached worker 独立持有,主线程退出时不会 dangling。
+    struct VideoParseState {
+        std::atomic<int>  status{ 0 };  // 0=idle 1=parsing 2=ok 3=error
+        std::mutex        mu;
+        std::string       url;
+        std::string       title;
+        std::string       meta;
+        std::string       error;
+        std::atomic<bool> running{ false };
+    };
+    auto video_state = std::make_shared<VideoParseState>();
+
+    auto copy_to_clipboard = [&](const char* utf8) -> bool {
+        if (!utf8 || !*utf8) return false;
+        int wn = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+        if (wn <= 0) return false;
+        HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)wn * sizeof(wchar_t));
+        if (!hg) return false;
+        auto* p = (wchar_t*)GlobalLock(hg);
+        if (!p) { GlobalFree(hg); return false; }
+        MultiByteToWideChar(CP_UTF8, 0, utf8, -1, p, wn);
+        GlobalUnlock(hg);
+        HWND hw = window.Hwnd();
+        if (!OpenClipboard(hw)) { GlobalFree(hg); return false; }
+        EmptyClipboard();
+        if (!SetClipboardData(CF_UNICODETEXT, hg)) {
+            // 失败时 hg 还归我们所有,得手动释放。
+            GlobalFree(hg);
+            CloseClipboard();
+            return false;
+        }
+        CloseClipboard();
+        return true;
+    };
 
     bool autostart_consumed = false;
     bool com_init_main = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
@@ -378,6 +415,74 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 !menu_state.audio_relay_running) {
                 autostart_consumed = true;
                 menu_state.audio_start_request = true;
+            }
+        }
+
+        // ---- Bilibili parser per-frame wiring ----
+        {
+            // 起 worker:已经有一个在跑就忽略,防止用户连点按钮把网卡塞满。
+            if (menu_state.video_parse_request && !video_state->running.load()) {
+                menu_state.video_parse_request = false;
+                std::string input = menu_state.video_input;
+                video_state->running.store(true);
+                video_state->status.store(1);
+                {
+                    std::lock_guard<std::mutex> lk(video_state->mu);
+                    video_state->url.clear();
+                    video_state->title.clear();
+                    video_state->meta.clear();
+                    video_state->error.clear();
+                }
+                auto st = video_state;
+                std::thread([st, input]() {
+                    auto r = bilibili::Parse(input);
+                    std::lock_guard<std::mutex> lk(st->mu);
+                    if (r.ok) {
+                        st->url   = r.url;
+                        st->title = r.title;
+                        // 拼一下展示 meta:质量 · 格式 · 节点
+                        st->meta  = r.quality;
+                        if (!r.format.empty()) { st->meta += " \xC2\xB7 "; st->meta += r.format; }
+                        if (!r.node.empty())   { st->meta += " \xC2\xB7 "; st->meta += r.node; }
+                        st->status.store(2);
+                    } else {
+                        st->error = [&]() -> std::string {
+                            switch (r.error) {
+                                case bilibili::ErrorCode::NoBv:
+                                    return "No BV id found in the input.";
+                                case bilibili::ErrorCode::ShortlinkFailed:
+                                    return "Failed to resolve b23.tv short link.";
+                                case bilibili::ErrorCode::Network:
+                                    return "Network error (timeout / DNS).";
+                                case bilibili::ErrorCode::Api:
+                                    return "Bilibili API rejected (region locked or login required).";
+                                case bilibili::ErrorCode::NoStream:
+                                    return "No playable stream returned.";
+                                case bilibili::ErrorCode::JsonInvalid:
+                                    return "Invalid JSON response.";
+                                default: return "Unknown error.";
+                            }
+                        }();
+                        st->status.store(3);
+                    }
+                    st->running.store(false);
+                }).detach();
+            }
+
+            // 镜像 worker 状态到 menu_state(主线程持锁短,worker 写锁短,
+            // 不会卡 UI 帧时间)。
+            menu_state.video_status = video_state->status.load();
+            {
+                std::lock_guard<std::mutex> lk(video_state->mu);
+                copy_safe(menu_state.video_result_url,   sizeof(menu_state.video_result_url),   video_state->url);
+                copy_safe(menu_state.video_result_title, sizeof(menu_state.video_result_title), video_state->title);
+                copy_safe(menu_state.video_result_meta,  sizeof(menu_state.video_result_meta),  video_state->meta);
+                copy_safe(menu_state.video_error,        sizeof(menu_state.video_error),        video_state->error);
+            }
+
+            if (menu_state.video_copy_request) {
+                menu_state.video_copy_request = false;
+                copy_to_clipboard(menu_state.video_result_url);
             }
         }
 

@@ -101,4 +101,75 @@ bool HttpGet(const std::string& url,
     return ok;
 }
 
+bool ResolveRedirect(const std::string& url,
+                     const std::string& headers,
+                     std::string& out_location,
+                     int& out_status) {
+    out_location.clear();
+    out_status = 0;
+
+    bool secure = false;
+    std::wstring host, path;
+    int port = 0;
+    if (!ParseUrl(url, secure, host, port, path)) return false;
+
+    HINTERNET hSession = WinHttpOpen(L"vrc-lyrics/0.1",
+        WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+
+    WinHttpSetTimeouts(hSession, 4000, 4000, 4000, 6000);
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), (INTERNET_PORT)port, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(),
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    // 关掉自动重定向跟随,这样 3xx 响应才会原样回来,Location 头能直接拿到。
+    DWORD disable = WINHTTP_DISABLE_REDIRECTS;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_DISABLE_FEATURE, &disable, sizeof(disable));
+
+    std::wstring whdr = Utf8ToWide(headers);
+    BOOL sent = WinHttpSendRequest(hRequest,
+        whdr.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : whdr.c_str(),
+        (DWORD)(whdr.empty() ? 0 : -1),
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (sent) sent = WinHttpReceiveResponse(hRequest, nullptr);
+
+    bool ok = false;
+    if (sent) {
+        DWORD code = 0, code_size = sizeof(code);
+        WinHttpQueryHeaders(hRequest,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &code, &code_size, WINHTTP_NO_HEADER_INDEX);
+        out_status = (int)code;
+
+        DWORD loc_size = 0;
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_LOCATION,
+            WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &loc_size, WINHTTP_NO_HEADER_INDEX);
+        if (loc_size > 0) {
+            std::wstring loc(loc_size / sizeof(wchar_t), L'\0');
+            if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_LOCATION,
+                    WINHTTP_HEADER_NAME_BY_INDEX, loc.data(), &loc_size,
+                    WINHTTP_NO_HEADER_INDEX)) {
+                while (!loc.empty() && loc.back() == L'\0') loc.pop_back();
+                int n = WideCharToMultiByte(CP_UTF8, 0, loc.c_str(), (int)loc.size(),
+                                            nullptr, 0, nullptr, nullptr);
+                out_location.assign(n, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, loc.c_str(), (int)loc.size(),
+                                    out_location.data(), n, nullptr, nullptr);
+                ok = true;
+            }
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return ok;
+}
+
 }

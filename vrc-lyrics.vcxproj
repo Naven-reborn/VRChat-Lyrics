@@ -40,7 +40,7 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)out\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)out\$(Configuration)\obj\</IntDir>
-    <TargetName>vrc-lyrics</TargetName>
+    <TargetName>vrc-lyrics-3.0</TargetName>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
@@ -114,6 +114,8 @@
     <ClCompile Include="src\audio\relay.cpp" />
     <ClCompile Include="src\audio\vbcable_installer.cpp" />
 
+    <ClCompile Include="src\bilibili\parser.cpp" />
+
     <ClCompile Include="deps\imgui\imgui.cpp" />
     <ClCompile Include="deps\imgui\imgui_demo.cpp" />
     <ClCompile Include="deps\imgui\imgui_draw.cpp" />
@@ -153,6 +155,8 @@
     <ClInclude Include="src\audio\process_loopback.h" />
     <ClInclude Include="src\audio\relay.h" />
     <ClInclude Include="src\audio\vbcable_installer.h" />
+
+    <ClInclude Include="src\bilibili\parser.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

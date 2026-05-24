@@ -24,11 +24,12 @@ void SoftLimiter::Process(float* samples, uint32_t frame_count, int channels) {
     uint32_t n = frame_count * (uint32_t)channels;
     float peak = 0.f;
 
-    // Knee: only the top 5% of headroom uses a soft curve; everything below
-    // passes through completely untouched. Above ceiling, hard clip.
-    const float knee = ceiling_ * 0.95f;
-    const float knee_range = ceiling_ - knee;
+    // 15% headroom 走 tanh 渐进 —— 信号永远逼近但触不到 ceiling,
+    // 没有硬切产生的奇次谐波(Opus 在低码率下会把这些谐波放大成"金属感")。
+    // 线性区(|x| <= knee)完全透传。
     const float ceiling = ceiling_;
+    const float knee = ceiling * 0.85f;
+    const float headroom = ceiling - knee;  // 软压缩可用的范围
 
     if (enabled_) {
         for (uint32_t i = 0; i < n; ++i) {
@@ -41,16 +42,11 @@ void SoftLimiter::Process(float* samples, uint32_t frame_count, int channels) {
                 continue;
             }
             float sign = (x >= 0.f) ? 1.f : -1.f;
-            if (ax >= ceiling) {
-                // Hard clip at ceiling.
-                samples[i] = sign * ceiling;
-            } else {
-                // Soft knee: quadratic that's tangent to y=x at knee and
-                // tangent to y=ceiling at ceiling. ~5% headroom of curving.
-                float t = (ax - knee) / knee_range;       // 0..1
-                float shaped = knee + knee_range * (t - 0.5f * t * t);
-                samples[i] = sign * shaped;
-            }
+            float excess  = ax - knee;
+            // tanh 在 0 处斜率=1 跟 knee 处线性区连续,在 +inf 趋近 1,
+            // 所以 knee + headroom * tanh(...) 永远不超过 ceiling。
+            float shaped = knee + headroom * std::tanh(excess / headroom);
+            samples[i] = sign * shaped;
         }
     } else {
         for (uint32_t i = 0; i < n; ++i) {
