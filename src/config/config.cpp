@@ -72,6 +72,17 @@ void Load(menu::State& s) {
     get_float("audio_gain_db",          s.audio_gain_db);
     get_bool ("audio_limiter",          s.audio_limiter);
     get_bool ("audio_autostart",        s.audio_autostart);
+
+    // Activity tab (v3.1)
+    get_bool ("afk_auto",          s.afk_auto);
+    get_int  ("afk_threshold_min", s.afk_threshold_min);
+    get_str  ("emoji_game",    s.emoji_game,    sizeof(s.emoji_game));
+    get_str  ("emoji_browser", s.emoji_browser, sizeof(s.emoji_browser));
+    get_str  ("emoji_chat",    s.emoji_chat,    sizeof(s.emoji_chat));
+    get_str  ("emoji_dev",     s.emoji_dev,     sizeof(s.emoji_dev));
+    get_str  ("emoji_music",   s.emoji_music,   sizeof(s.emoji_music));
+    get_str  ("emoji_office",  s.emoji_office,  sizeof(s.emoji_office));
+    get_str  ("emoji_stream",  s.emoji_stream,  sizeof(s.emoji_stream));
 }
 
 bool Save(const menu::State& s) {
@@ -98,6 +109,16 @@ bool Save(const menu::State& s) {
     j["audio_gain_db"]          = s.audio_gain_db;
     j["audio_limiter"]          = s.audio_limiter;
     j["audio_autostart"]        = s.audio_autostart;
+
+    j["afk_auto"]               = s.afk_auto;
+    j["afk_threshold_min"]      = s.afk_threshold_min;
+    j["emoji_game"]             = s.emoji_game;
+    j["emoji_browser"]          = s.emoji_browser;
+    j["emoji_chat"]             = s.emoji_chat;
+    j["emoji_dev"]              = s.emoji_dev;
+    j["emoji_music"]            = s.emoji_music;
+    j["emoji_office"]           = s.emoji_office;
+    j["emoji_stream"]           = s.emoji_stream;
 
     auto tmp = ConfigPath();
     tmp += L".tmp";

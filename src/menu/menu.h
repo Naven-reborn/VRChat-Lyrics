@@ -1,6 +1,8 @@
 #pragma once
 #include "style.h"
 #include "i18n/i18n.h"
+#include <cstdint>
+#include <string>
 
 namespace menu {
 
@@ -19,6 +21,28 @@ struct State {
     bool send_while_paused = true;
     bool show_foreground_app = true;       // append "🎮 AppName" to chatbox
     char foreground_app[64] = "";          // updated by main.cpp each frame
+    int  foreground_category = 0;          // util::AppCategory enum value
+    uint32_t idle_seconds = 0;             // GetLastInputInfo, updated each frame
+
+    // Status override — session-only (会话级,不写 config)。优先级最高,顶掉
+    // AFK 和前台应用,直到 _remaining_sec 走到 0 或用户清空。
+    char status_override[96]       = "";
+    char status_override_emoji[8]  = "";   // UTF-8,如 "\xF0\x9F\x92\xA4"
+    int  status_override_clear_min = 0;    // 0=永久 / 5 / 30 / 60
+    int  status_override_remaining_sec = 0; // 倒计时,0 且 clear_min>0 时清空
+
+    // AFK 自动:键鼠空闲超过 threshold 分钟,chatbox 前缀显示 "💤 AFK"。
+    bool afk_auto = true;                  // 持久化
+    int  afk_threshold_min = 5;            // 持久化
+
+    // 分类前缀图标,每类一个 UTF-8 emoji(用户可在 UI 里从 4 个候选改)。持久化。
+    char emoji_game[8]    = "\xF0\x9F\x8E\xAE"; // 🎮
+    char emoji_browser[8] = "\xF0\x9F\x8C\x90"; // 🌐
+    char emoji_chat[8]    = "\xF0\x9F\x92\xAC"; // 💬
+    char emoji_dev[8]     = "\xF0\x9F\x92\xBB"; // 💻
+    char emoji_music[8]   = "\xF0\x9F\x8E\xB5"; // 🎵
+    char emoji_office[8]  = "\xF0\x9F\x93\x84"; // 📄
+    char emoji_stream[8]  = "\xF0\x9F\x8E\xAC"; // 🎬
 
     // Live playback view — pushed in each frame from main.cpp.
     bool        np_detected   = false;
@@ -99,6 +123,11 @@ struct State {
 };
 
 void Draw(State& s, int win_w, int win_h);
+
+// 计算当前应该挂在 chatbox 前面的状态前缀(含 emoji 和分隔符,如 "🎮 VRChat · ")。
+// 优先级:status_override > AFK > 前台应用。空串表示不挂任何前缀。
+// UI 预览和 main.cpp 构造 chatbox 都调这个,保证两边显示一致。
+std::string EffectiveStatusPrefix(const State& s);
 
 // Custom widgets matching the Neverlose look.
 bool NLToggle(const char* label, bool* v);

@@ -1,6 +1,7 @@
 #include "menu.h"
 #include "style.h"
 #include "i18n/i18n.h"
+#include "util/foreground.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include <Windows.h>
@@ -31,6 +32,50 @@ static ImU32 U32(const ImVec4& c, float alpha) {
 }
 static ImU32 Mix(const ImVec4& a, const ImVec4& b, float t) {
     return U32(ImVec4(Lerp(a.x, b.x, t), Lerp(a.y, b.y, t), Lerp(a.z, b.z, t), Lerp(a.w, b.w, t)));
+}
+
+// 根据 state 选当前的分类 emoji。返回的是指向 state 内部 char[] 的指针。
+static const char* CategoryEmojiFromState(const State& s, util::AppCategory cat) {
+    switch (cat) {
+        case util::AppCategory::Game:    return s.emoji_game;
+        case util::AppCategory::Browser: return s.emoji_browser;
+        case util::AppCategory::Chat:    return s.emoji_chat;
+        case util::AppCategory::Dev:     return s.emoji_dev;
+        case util::AppCategory::Music:   return s.emoji_music;
+        case util::AppCategory::Office:  return s.emoji_office;
+        case util::AppCategory::Stream:  return s.emoji_stream;
+        default:                         return util::DefaultCategoryEmoji(cat);
+    }
+}
+
+std::string EffectiveStatusPrefix(const State& s) {
+    // 1. status_override:文本非空 + 倒计时未到 0(或 clear_min == 0 永久)。
+    bool override_active = (s.status_override[0] != 0) &&
+                           (s.status_override_clear_min == 0 ||
+                            s.status_override_remaining_sec > 0);
+    if (override_active) {
+        std::string out;
+        if (s.status_override_emoji[0]) { out += s.status_override_emoji; out += ' '; }
+        else                            { out += "\xF0\x9F\x93\x9D "; } // 默认 📝
+        out += s.status_override;
+        out += " \xC2\xB7 ";  // " · "
+        return out;
+    }
+    // 2. AFK 自动检测。
+    if (s.afk_auto && s.afk_threshold_min > 0 &&
+        (int)s.idle_seconds >= s.afk_threshold_min * 60) {
+        return std::string("\xF0\x9F\x92\xA4 AFK \xC2\xB7 ");
+    }
+    // 3. 前台应用(沿用 v1 行为,只在 toggle 开 + 有检测结果时挂)。
+    if (s.show_foreground_app && s.foreground_app[0]) {
+        std::string out;
+        out += CategoryEmojiFromState(s, (util::AppCategory)s.foreground_category);
+        out += ' ';
+        out += s.foreground_app;
+        out += " \xC2\xB7 ";
+        return out;
+    }
+    return {};
 }
 
 namespace icons {
@@ -484,40 +529,370 @@ static void DrawLyrics(State& s) {
     CardEnd();
 }
 
+// 滑动 emoji 选择器:4 个候选,选中态用一条 accent pill 显示。切换时:
+//   - pill 走二阶弹簧物理(stiffness/damping),~350ms 弹到位,带一点点 overshoot
+//   - 速度越快 pill 横向"拉长"(squash-stretch),停下来弹回标准宽度
+//   - 点击瞬间外加一圈 ease-out cubic 衰减的 halo
+// 返回 true 表示选择被改了。状态全部存在 ImGuiStorage 里,跨帧持久。
+//
+// !!! 重要 !!!
+// 所有 ID 必须用 slot 的【内存地址】当 cookie,不能用字符串内容。
+// 因为 slot 内容会被用户点击改写,如果用 GetID(const char*) 把内容当字符串哈希,
+// 每次切换 emoji 都会换一套新 ID,storage 里的 pos/vel 拿不回来 —— 动画就丢了。
+static bool AnimatedEmojiPicker(char* slot, size_t slot_size,
+                                const char* const choices[4]) {
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (win->SkipItems) return false;
+
+    // 当前选中索引:与 slot 字符串一致的候选,没匹配上就当 0。
+    int selected = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (std::strcmp(slot, choices[i]) == 0) { selected = i; break; }
+    }
+
+    // 用 slot 的内存地址做基址,异或两个常量出 3 个稳定 ID。
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    uintptr_t base   = (uintptr_t)slot;
+    ImGuiID anim_id  = win->GetID((const void*)base);
+    ImGuiID vel_id   = win->GetID((const void*)(base ^ (uintptr_t)0xCAFEu));
+    ImGuiID pulse_id = win->GetID((const void*)(base ^ (uintptr_t)0xBEEFu));
+
+    // 钳一下 dt,主线程偶尔被卡(切窗口/暂停)时一帧 0.3s 会让弹簧爆炸。
+    float dt = ImGui::GetIO().DeltaTime;
+    if (dt > 0.05f) dt = 0.05f;
+
+    // 二阶弹簧:acc = k * (target - pos) - c * vel。
+    // k=280, c=22 → 临界阻尼 c_crit = 2*sqrt(280) ≈ 33.5,这里 c/c_crit ≈ 0.66,
+    // 略欠阻尼,带轻微 overshoot,iOS 风格。完整 settle ~350ms。
+    float pos = st->GetFloat(anim_id, (float)selected);
+    float vel = st->GetFloat(vel_id,  0.f);
+    const float k_spring = 280.f;
+    const float c_damp   = 22.f;
+    float target = (float)selected;
+    float acc = k_spring * (target - pos) - c_damp * vel;
+    vel += acc * dt;
+    pos += vel * dt;
+    // 接近静止时强制对齐,免得永远在小数位震荡。
+    if (std::fabs(target - pos) < 1.f / 1024.f && std::fabs(vel) < 0.02f) {
+        pos = target;
+        vel = 0.f;
+    }
+    st->SetFloat(anim_id, pos);
+    st->SetFloat(vel_id,  vel);
+
+    // Halo pulse:点击 1.f → 0,400ms 线性衰减,显示时再做 ease-out cubic
+    float pulse_raw = st->GetFloat(pulse_id, 0.f);
+    pulse_raw = pulse_raw - dt / 0.40f;
+    if (pulse_raw < 0.f) pulse_raw = 0.f;
+    st->SetFloat(pulse_id, pulse_raw);
+
+    const float btn_w = S(36.f);
+    const float btn_h = S(26.f);
+    const float gap   = S(2.f);
+    const float pitch = btn_w + gap;
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = win->DrawList;
+
+    // squash-stretch:速度大时 pill 横向拉长(对称扩张就够了,非对称版要两条弹簧)。
+    // vel 单位 cells/sec,典型峰值 6-12,系数 0.04 让顶峰拉伸 25% 左右。
+    float vel_abs = std::fabs(vel);
+    float stretch = vel_abs * 0.04f;
+    if (stretch > 0.25f) stretch = 0.25f;
+    float extra_w = btn_w * stretch;
+
+    // Pill 主体位置(基于动画位置 pos,而非 selected)
+    ImVec2 pill_min(origin.x + pos * pitch - extra_w * 0.5f, origin.y);
+    ImVec2 pill_max(pill_min.x + btn_w + extra_w, pill_min.y + btn_h);
+
+    // 1. Halo glow(只在 pulse > 0 时画,ease-out cubic 让头快尾慢)
+    if (pulse_raw > 0.005f) {
+        float p_inv = 1.f - pulse_raw;
+        float ease  = 1.f - p_inv * p_inv * p_inv;
+        float halo_extra = S(7.f) * ease;
+        ImVec4 glow_col = col::accent;
+        glow_col.w = ease * 0.45f;
+        dl->AddRectFilled(
+            ImVec2(pill_min.x - halo_extra, pill_min.y - halo_extra),
+            ImVec2(pill_max.x + halo_extra, pill_max.y + halo_extra),
+            ImGui::ColorConvertFloat4ToU32(glow_col), S(9.f));
+    }
+
+    // 2. 主 pill(被 stretch 撑开)
+    dl->AddRectFilled(pill_min, pill_max, U32(col::accent), S(4.f));
+
+    bool changed = false;
+    for (int i = 0; i < 4; ++i) {
+        // 同样的道理,PushID 也要用指针(稳定)而非字符串内容。
+        ImGui::PushID((const void*)slot);
+        ImGui::PushID(i);
+
+        if (i > 0) ImGui::SameLine(0, gap);
+        ImVec2 cell_pos = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##c", ImVec2(btn_w, btn_h))) {
+            size_t n = std::strlen(choices[i]);
+            if (n >= slot_size) n = slot_size - 1;
+            std::memcpy(slot, choices[i], n);
+            slot[n] = 0;
+            st->SetFloat(pulse_id, 1.f);
+            // 给 vel 一个初始冲量,免得静止 → 极慢加速的迟钝感。
+            float bump = (float)i - pos;
+            float existing_vel = st->GetFloat(vel_id, 0.f);
+            if (std::fabs(existing_vel) < std::fabs(bump) * 3.f) {
+                st->SetFloat(vel_id, existing_vel + bump * 4.f);
+            }
+            changed = true;
+        }
+        bool hovered = ImGui::IsItemHovered();
+
+        if (hovered && i != selected) {
+            dl->AddRectFilled(
+                cell_pos, ImVec2(cell_pos.x + btn_w, cell_pos.y + btn_h),
+                U32(col::bg_hover, 0.5f), S(4.f));
+        }
+
+        float dist    = std::fabs(pos - (float)i);
+        float on_pill = (dist < 1.f) ? (1.f - dist) : 0.f;
+        ImU32 text_col = Mix(col::text, ImVec4(0.05f, 0.07f, 0.10f, 1.f), on_pill);
+
+        ImVec2 text_sz = ImGui::CalcTextSize(choices[i]);
+        ImVec2 text_pos(cell_pos.x + (btn_w - text_sz.x) * 0.5f,
+                        cell_pos.y + (btn_h - text_sz.y) * 0.5f);
+        dl->AddText(text_pos, text_col, choices[i]);
+
+        ImGui::PopID();
+        ImGui::PopID();
+    }
+    return changed;
+}
+
 static void DrawActivity(State& s) {
-    SectionTitle(i18n::t("FOREGROUND APP", "前台应用", "前台應用"));
-    CardBegin("##card_act");
+    // ----- 卡片 1:NOW -----
+    SectionTitle(i18n::t("NOW", "\xE7\x8E\xB0\xE5\x9C\xA8", "\xE7\x8F\xBE\xE5\x9C\xA8"));
+    CardBegin("##card_act_now");
+
+    // 检测到的前台应用
     ImGui::PushFont(font_title);
     if (s.foreground_app[0]) {
-        ImGui::TextColored(col::text, "\xF0\x9F\x8E\xAE %s", s.foreground_app);
+        const char* emo = CategoryEmojiFromState(s, (util::AppCategory)s.foreground_category);
+        ImGui::TextColored(col::text, "%s %s", emo, s.foreground_app);
     } else {
         ImGui::TextColored(col::text_dim, "%s",
-            i18n::t("(no foreground app)", "(无前台应用)", "(無前台應用)"));
+            i18n::t("(no foreground app)",
+                    "(\xE6\x97\xA0\xE5\x89\x8D\xE5\x8F\xB0\xE5\xBA\x94\xE7\x94\xA8)",
+                    "(\xE7\x84\xA1\xE5\x89\x8D\xE5\x8F\xB0\xE6\x87\x89\xE7\x94\xA8)"));
     }
     ImGui::PopFont();
+
+    // 键鼠空闲
     ImGui::PushFont(font_body);
-    ImGui::TextColored(col::text_dim, "%s",
-        i18n::t("The application that currently owns keyboard focus on your system.",
-                "当前键盘焦点所在的应用。",
-                "目前鍵盤焦點所在的應用程式。"));
+    uint32_t sec = s.idle_seconds;
+    char idle_buf[64];
+    if (sec < 60) {
+        std::snprintf(idle_buf, sizeof(idle_buf), "%us", sec);
+    } else if (sec < 3600) {
+        std::snprintf(idle_buf, sizeof(idle_buf), "%um %us", sec / 60, sec % 60);
+    } else {
+        std::snprintf(idle_buf, sizeof(idle_buf), "%uh %um", sec / 3600, (sec % 3600) / 60);
+    }
+    bool afk_active = s.afk_auto && s.afk_threshold_min > 0 &&
+                      (int)sec >= s.afk_threshold_min * 60;
+    ImGui::TextColored(afk_active ? col::accent : col::text_dim, "%s %s%s",
+        i18n::t("Idle:", "\xE7\xA9\xBA\xE9\x97\xB2\xEF\xBC\x9A", "\xE7\xA9\xBA\xE9\x96\x92\xEF\xBC\x9A"),
+        idle_buf,
+        afk_active ? i18n::t("  (AFK)", "  \xEF\xBC\x88\xE5\xB7\xB2 AFK\xEF\xBC\x89", "  \xEF\xBC\x88\xE5\xB7\xB2 AFK\xEF\xBC\x89") : "");
+
+    // 实时预览:effective prefix
+    std::string prefix = EffectiveStatusPrefix(s);
+    if (!prefix.empty()) {
+        ImGui::Dummy(ImVec2(0, S(4.f)));
+        ImGui::TextColored(col::text_dim, "%s",
+            i18n::t("Chatbox prefix:",
+                    "Chatbox \xE5\x89\x8D\xE7\xBC\x80\xEF\xBC\x9A",
+                    "Chatbox \xE5\x89\x8D\xE7\xB6\xB4\xEF\xBC\x9A"));
+        ImGui::TextColored(col::accent, "%s", prefix.c_str());
+    }
     ImGui::PopFont();
     CardEnd();
 
-    SectionTitle(i18n::t("BROADCAST", "广播", "廣播"));
+    // ----- 卡片 2:STATUS OVERRIDE -----
+    SectionTitle(i18n::t("STATUS OVERRIDE",
+                         "\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\xE7\x8A\xB6\xE6\x80\x81",
+                         "\xE8\x87\xAA\xE5\xAE\x9A\xE7\xBE\xA9\xE7\x8B\x80\xE6\x85\x8B"));
+    CardBegin("##card_act_status");
+    ImGui::PushFont(font_body);
+    ImGui::TextColored(col::text_dim, "%s",
+        i18n::t("Type a custom status, or pick a preset. Overrides AFK and foreground app.",
+                "\xE8\xBE\x93\xE5\x85\xA5\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\xE7\x8A\xB6\xE6\x80\x81\xE6\x88\x96\xE7\x82\xB9\xE9\xA2\x84\xE8\xAE\xBE\xE3\x80\x82\xE4\xBC\x9A\xE9\xA1\xB6\xE6\x8E\x89 AFK \xE5\x92\x8C\xE5\x89\x8D\xE5\x8F\xB0\xE5\xBA\x94\xE7\x94\xA8\xE3\x80\x82",
+                "\xE8\xBC\xB8\xE5\x85\xA5\xE8\x87\xAA\xE5\xAE\x9A\xE7\xBE\xA9\xE7\x8B\x80\xE6\x85\x8B\xE6\x88\x96\xE9\xBB\x9E\xE9\xA0\x90\xE8\xA8\xAD\xE3\x80\x82\xE6\x9C\x83\xE9\xA0\x82\xE6\x8E\x89 AFK \xE8\x88\x87\xE5\x89\x8D\xE5\x8F\xB0\xE6\x87\x89\xE7\x94\xA8\xE3\x80\x82"));
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, S(4.f)));
+
+    // 文本输入框
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::InputTextWithHint("##status_text",
+            i18n::t("e.g. \"in a meeting\", \"studying\", \"AFK 20m\"",
+                    "\xE4\xBE\x8B\xE5\xA6\x82 \"\xE5\xBC\x80\xE4\xBC\x9A\xE4\xB8\xAD\" / \"\xE5\xAD\xA6\xE4\xB9\xA0\xE4\xB8\xAD\" / \"AFK 20\xE5\x88\x86\"",
+                    "\xE4\xBE\x8B\xE5\xA6\x82 \"\xE9\x96\x8B\xE6\x9C\x83\xE4\xB8\xAD\" / \"\xE5\xAD\xB8\xE7\xBF\x92\xE4\xB8\xAD\" / \"AFK 20\xE5\x88\x86\""),
+            s.status_override, sizeof(s.status_override))) {
+        // 用户手动改了:如果还没 emoji 给一个 📝;并刷新倒计时。
+        if (s.status_override[0] && !s.status_override_emoji[0]) {
+            strcpy_s(s.status_override_emoji, sizeof(s.status_override_emoji), "\xF0\x9F\x93\x9D");
+        }
+        s.status_override_remaining_sec = s.status_override_clear_min * 60;
+    }
+
+    // 4 个预设 + 清除
+    ImGui::Dummy(ImVec2(0, S(4.f)));
+    struct Preset { const char* emoji; const char *en, *sc, *tc; };
+    static const Preset presets[] = {
+        { "\xF0\x9F\x9A\xB6", "BRB",    "\xE9\xA9\xAC\xE4\xB8\x8A\xE5\x9B\x9E", "\xE9\xA6\xAC\xE4\xB8\x8A\xE5\x9B\x9E" },
+        { "\xF0\x9F\x92\xA4", "Sleep",  "\xE7\x9D\xA1\xE8\xA7\x89",             "\xE7\x9D\xA1\xE8\xA6\xBA"             },
+        { "\xF0\x9F\x92\xBC", "Work",   "\xE5\xB7\xA5\xE4\xBD\x9C\xE4\xB8\xAD", "\xE5\xB7\xA5\xE4\xBD\x9C\xE4\xB8\xAD" },
+        { "\xF0\x9F\x8E\xAC", "Stream", "\xE7\x9B\xB4\xE6\x92\xAD\xE4\xB8\xAD", "\xE7\x9B\xB4\xE6\x92\xAD\xE4\xB8\xAD" },
+    };
+    float btn_w = (ImGui::GetContentRegionAvail().x - S(8.f) - S(4.f) * 4) / 5.f;
+    for (int i = 0; i < 4; ++i) {
+        if (i > 0) ImGui::SameLine(0, S(4.f));
+        char lbl[64];
+        std::snprintf(lbl, sizeof(lbl), "%s %s##preset%d", presets[i].emoji,
+                      i18n::current == i18n::Lang::SC ? presets[i].sc :
+                      i18n::current == i18n::Lang::TC ? presets[i].tc : presets[i].en,
+                      i);
+        if (ImGui::Button(lbl, ImVec2(btn_w, S(28.f)))) {
+            std::snprintf(s.status_override, sizeof(s.status_override), "%s",
+                          i18n::current == i18n::Lang::SC ? presets[i].sc :
+                          i18n::current == i18n::Lang::TC ? presets[i].tc : presets[i].en);
+            strcpy_s(s.status_override_emoji, sizeof(s.status_override_emoji), presets[i].emoji);
+            s.status_override_remaining_sec = s.status_override_clear_min * 60;
+        }
+    }
+    ImGui::SameLine(0, S(4.f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.34f, 0.40f, 1.f));
+    if (ImGui::Button(i18n::t("Clear##preset_clr",
+                              "\xE6\xB8\x85\xE9\x99\xA4##preset_clr",
+                              "\xE6\xB8\x85\xE9\x99\xA4##preset_clr"),
+                      ImVec2(btn_w, S(28.f)))) {
+        s.status_override[0]       = 0;
+        s.status_override_emoji[0] = 0;
+        s.status_override_remaining_sec = 0;
+    }
+    ImGui::PopStyleColor();
+
+    // 自动清除倒计时下拉
+    ImGui::Dummy(ImVec2(0, S(4.f)));
+    ImGui::PushFont(font_body);
+    ImGui::TextColored(col::text_dim, "%s",
+        i18n::t("Auto-clear after",
+                "\xE8\x87\xAA\xE5\x8A\xA8\xE6\xB8\x85\xE9\x99\xA4\xEF\xBC\x9A",
+                "\xE8\x87\xAA\xE5\x8B\x95\xE6\xB8\x85\xE9\x99\xA4\xEF\xBC\x9A"));
+    ImGui::PopFont();
+    static const char* clear_en[] = { "Never", "5 min", "30 min", "1 hour" };
+    static const char* clear_sc[] = { "\xE6\xB0\xB8\xE4\xB9\x85", "5 \xE5\x88\x86\xE9\x92\x9F", "30 \xE5\x88\x86\xE9\x92\x9F", "1 \xE5\xB0\x8F\xE6\x97\xB6" };
+    static const char* clear_tc[] = { "\xE6\xB0\xB8\xE4\xB9\x85", "5 \xE5\x88\x86\xE9\x90\x98", "30 \xE5\x88\x86\xE9\x90\x98", "1 \xE5\xB0\x8F\xE6\x99\x82" };
+    static const int   clear_vals[] = { 0, 5, 30, 60 };
+    int cur_idx = 0;
+    for (int i = 0; i < 4; ++i) if (clear_vals[i] == s.status_override_clear_min) { cur_idx = i; break; }
+    const char** clear_labels =
+        i18n::current == i18n::Lang::SC ? clear_sc :
+        i18n::current == i18n::Lang::TC ? clear_tc : clear_en;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::Combo("##clear_combo", &cur_idx, clear_labels, 4)) {
+        s.status_override_clear_min = clear_vals[cur_idx];
+        s.status_override_remaining_sec = s.status_override_clear_min * 60;
+    }
+
+    // 显示剩余时间
+    if (s.status_override[0] && s.status_override_clear_min > 0) {
+        ImGui::PushFont(font_caption);
+        int rem = s.status_override_remaining_sec;
+        if (rem < 60) {
+            ImGui::TextColored(col::text_dim, "%s %ds",
+                i18n::t("Clears in", "\xE5\x89\xA9\xE4\xBD\x99", "\xE5\x89\xA9\xE9\xA4\x98"), rem);
+        } else {
+            ImGui::TextColored(col::text_dim, "%s %dm %ds",
+                i18n::t("Clears in", "\xE5\x89\xA9\xE4\xBD\x99", "\xE5\x89\xA9\xE9\xA4\x98"), rem / 60, rem % 60);
+        }
+        ImGui::PopFont();
+    }
+    CardEnd();
+
+    // ----- 卡片 3:AFK AUTO -----
+    SectionTitle(i18n::t("AFK AUTO-DETECT",
+                         "AFK \xE8\x87\xAA\xE5\x8A\xA8\xE6\xA3\x80\xE6\xB5\x8B",
+                         "AFK \xE8\x87\xAA\xE5\x8B\x95\xE5\x81\xB5\xE6\xB8\xAC"));
+    CardBegin("##card_act_afk");
+    NLToggle(i18n::t("Set status to \"AFK\" after idle threshold",
+                     "\xE9\x94\xAE\xE9\xBC\xA0\xE7\xA9\xBA\xE9\x97\xB2\xE8\xB6\x85\xE9\x98\x88\xE5\x80\xBC\xE5\x90\x8E\xE8\x87\xAA\xE5\x8A\xA8\xE6\x98\xBE\xE7\xA4\xBA AFK",
+                     "\xE9\x8D\xB5\xE9\xBC\xA0\xE7\xA9\xBA\xE9\x96\x92\xE8\xB6\x85\xE9\x96\xBE\xE5\x80\xBC\xE5\xBE\x8C\xE8\x87\xAA\xE5\x8B\x95\xE9\xA1\xAF\xE7\xA4\xBA AFK"),
+             &s.afk_auto);
+    NLSliderInt(i18n::t("Threshold (min)",
+                        "\xE9\x98\x88\xE5\x80\xBC\xEF\xBC\x88\xE5\x88\x86\xE9\x92\x9F\xEF\xBC\x89",
+                        "\xE9\x96\xBE\xE5\x80\xBC\xEF\xBC\x88\xE5\x88\x86\xE9\x90\x98\xEF\xBC\x89"),
+                &s.afk_threshold_min, 1, 60);
+    CardEnd();
+
+    // ----- 卡片 4:BROADCAST -----
+    SectionTitle(i18n::t("BROADCAST", "\xE5\xB9\xBF\xE6\x92\xAD", "\xE5\xBB\xA3\xE6\x92\xAD"));
     CardBegin("##card_act_send");
-    NLToggle(i18n::t("Append to chatbox", "附加到 chatbox", "附加到 chatbox"),
+    NLToggle(i18n::t("Append foreground app to chatbox",
+                     "\xE5\x89\x8D\xE5\x8F\xB0\xE5\xBA\x94\xE7\x94\xA8\xE9\x99\x84\xE5\x8A\xA0\xE5\x88\xB0 chatbox",
+                     "\xE5\x89\x8D\xE5\x8F\xB0\xE6\x87\x89\xE7\x94\xA8\xE9\x99\x84\xE5\x8A\xA0\xE5\x88\xB0 chatbox"),
              &s.show_foreground_app);
     ImGui::PushFont(font_caption);
     ImGui::TextColored(col::text_dim, "%s",
-        i18n::t("Prefix the chatbox message with the foreground app name.",
-                "在 chatbox 消息前加上当前前台应用名。",
-                "在 chatbox 訊息前加上目前前台應用程式名稱。"));
+        i18n::t("Only takes effect when no custom status / AFK is active.",
+                "\xE4\xBB\x85\xE5\x9C\xA8\xE6\x97\xA0\xE8\x87\xAA\xE5\xAE\x9A\xE4\xB9\x89\xE7\x8A\xB6\xE6\x80\x81\xE4\xB8\x94\xE6\x9C\xAA AFK \xE6\x97\xB6\xE7\x94\x9F\xE6\x95\x88\xE3\x80\x82",
+                "\xE5\x83\x85\xE5\x9C\xA8\xE7\x84\xA1\xE8\x87\xAA\xE5\xAE\x9A\xE7\xBE\xA9\xE7\x8B\x80\xE6\x85\x8B\xE4\xB8\x94\xE6\x9C\xAA AFK \xE6\x99\x82\xE7\x94\x9F\xE6\x95\x88\xE3\x80\x82"));
     ImGui::PopFont();
-    if (s.show_foreground_app && s.foreground_app[0]) {
-        ImGui::Dummy(ImVec2(0, S(6.f)));
+    CardEnd();
+
+    // ----- 卡片 5:分类图标自定义 -----
+    SectionTitle(i18n::t("CATEGORY EMOJI",
+                         "\xE5\x88\x86\xE7\xB1\xBB\xE5\x9B\xBE\xE6\xA0\x87",
+                         "\xE5\x88\x86\xE9\xA1\x9E\xE5\x9C\x96\xE7\xA4\xBA"));
+    CardBegin("##card_act_emoji");
+    ImGui::PushFont(font_caption);
+    ImGui::TextColored(col::text_dim, "%s",
+        i18n::t("Pick the emoji shown before the foreground app name.",
+                "\xE9\x80\x89\xE6\x8B\xA9\xE5\x90\x84\xE5\x88\x86\xE7\xB1\xBB\xE5\xBA\x94\xE7\x94\xA8\xE5\x90\x8D\xE5\x89\x8D\xE7\x9A\x84 emoji\xE3\x80\x82",
+                "\xE9\x81\xB8\xE6\x93\x87\xE5\x90\x84\xE5\x88\x86\xE9\xA1\x9E\xE6\x87\x89\xE7\x94\xA8\xE5\x90\x8D\xE5\x89\x8D\xE7\x9A\x84 emoji\xE3\x80\x82"));
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, S(4.f)));
+
+    // 每个分类一行:label + 4 个 emoji 按钮
+    struct EmojiRow {
+        const char* label_en; const char* label_sc; const char* label_tc;
+        char*       slot;          // 指向 state 里的 emoji_* 字段
+        const char* choices[4];    // 4 个候选
+    };
+    EmojiRow rows[] = {
+        { "Games",   "\xE6\xB8\xB8\xE6\x88\x8F",   "\xE9\x81\x8A\xE6\x88\xB2",   s.emoji_game,
+            { "\xF0\x9F\x8E\xAE", "\xF0\x9F\x95\xB9", "\xF0\x9F\x91\xBE", "\xF0\x9F\x8E\xAF" }},   // 🎮 🕹 👾 🎯
+        { "Browser", "\xE6\xB5\x8F\xE8\xA7\x88\xE5\x99\xA8", "\xE7\x80\x8F\xE8\xA6\xBD\xE5\x99\xA8", s.emoji_browser,
+            { "\xF0\x9F\x8C\x90", "\xF0\x9F\xA7\xAD", "\xF0\x9F\x94\x97", "\xF0\x9F\x93\x96" }},   // 🌐 🧭 🔗 📖
+        { "Chat",    "\xE8\x81\x8A\xE5\xA4\xA9",   "\xE8\x81\x8A\xE5\xA4\xA9",   s.emoji_chat,
+            { "\xF0\x9F\x92\xAC", "\xF0\x9F\x92\xAD", "\xF0\x9F\x97\xA8", "\xF0\x9F\x93\x9E" }},   // 💬 💭 🗨 📞
+        { "IDE",     "\xE5\xBC\x80\xE5\x8F\x91",   "\xE9\x96\x8B\xE7\x99\xBC",   s.emoji_dev,
+            { "\xF0\x9F\x92\xBB", "\xE2\x8C\xA8", "\xF0\x9F\x9B\xA0", "\xF0\x9F\x90\x9B" }},       // 💻 ⌨ 🛠 🐛
+        { "Music",   "\xE9\x9F\xB3\xE4\xB9\x90",   "\xE9\x9F\xB3\xE6\xA8\x82",   s.emoji_music,
+            { "\xF0\x9F\x8E\xB5", "\xF0\x9F\x8E\xB6", "\xF0\x9F\x8E\xA7", "\xF0\x9F\x8E\xA4" }},   // 🎵 🎶 🎧 🎤
+        { "Office",  "\xE5\x8A\x9E\xE5\x85\xAC",   "\xE8\xBE\xA6\xE5\x85\xAC",   s.emoji_office,
+            { "\xF0\x9F\x93\x84", "\xF0\x9F\x93\x8A", "\xF0\x9F\x93\x9D", "\xF0\x9F\x93\x9A" }},   // 📄 📊 📝 📚
+        { "Stream",  "\xE5\x88\x9B\xE4\xBD\x9C",   "\xE5\x89\xB5\xE4\xBD\x9C",   s.emoji_stream,
+            { "\xF0\x9F\x8E\xAC", "\xF0\x9F\x93\xB9", "\xF0\x9F\x94\xB4", "\xF0\x9F\x93\xBD" }},   // 🎬 📹 🔴 📽
+    };
+
+    for (auto& row : rows) {
         ImGui::PushFont(font_body);
-        ImGui::TextColored(col::accent, "\xF0\x9F\x8E\xAE %s \xC2\xB7 ...", s.foreground_app);
+        ImGui::TextColored(col::text_dim, "%-8s",
+            i18n::current == i18n::Lang::SC ? row.label_sc :
+            i18n::current == i18n::Lang::TC ? row.label_tc : row.label_en);
         ImGui::PopFont();
+        ImGui::SameLine(S(80.f));
+        // 滑动 pill + 点击 halo,跨帧弹簧由 ImGuiStorage 持久化。
+        // ID 用 slot 内存地址当 cookie(见 AnimatedEmojiPicker 内的说明)。
+        AnimatedEmojiPicker(row.slot, sizeof(s.emoji_game), row.choices);
     }
     CardEnd();
 }
@@ -1100,7 +1475,7 @@ void Draw(State& s, int win_w, int win_h) {
                    s.service_running
                      ? i18n::t("\xE2\x97\x8F Service ON",  "\xE2\x97\x8F \xE6\x9C\x8D\xE5\x8A\xA1\xE5\xBC\x80\xE5\x90\xAF", "\xE2\x97\x8F \xE6\x9C\x8D\xE5\x8B\x99\xE9\x96\x8B\xE5\x95\x9F")
                      : i18n::t("\xE2\x97\x8B Service OFF", "\xE2\x97\x8B \xE6\x9C\x8D\xE5\x8A\xA1\xE5\x85\xB3\xE9\x97\xAD", "\xE2\x97\x8B \xE6\x9C\x8D\xE5\x8B\x99\xE9\x97\x9C\xE9\x96\x89"));
-    const char* ver = "v3.0";
+    const char* ver = "v3.1";
     ImVec2 vsz = ImGui::CalcTextSize(ver);
     dl_fg->AddText(ImVec2(f0.x + wsz.x - vsz.x - S(12.f), f0.y + footer_h - S(18.f)),
                    U32(col::text_dim), ver);

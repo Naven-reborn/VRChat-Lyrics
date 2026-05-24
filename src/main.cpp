@@ -206,8 +206,30 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             auto now_pt = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now_pt - last_fg_query).count() > 500) {
                 last_fg_query = now_pt;
-                std::string app = util::ForegroundAppName();
-                copy_safe(menu_state.foreground_app, sizeof(menu_state.foreground_app), app);
+                auto fg = util::ForegroundApp();
+                copy_safe(menu_state.foreground_app, sizeof(menu_state.foreground_app), fg.name);
+                menu_state.foreground_category = (int)fg.category;
+            }
+            // 键鼠空闲秒数,每帧查也很便宜(就一个 GetLastInputInfo 系统调用)。
+            menu_state.idle_seconds = util::IdleSeconds();
+
+            // status_override 倒计时:只在 clear_min>0 且文本非空时滴答。
+            // 每帧扣一次太快,按 DeltaTime 累积。这里用一个静态累加器,
+            // 避免每帧都做整数运算,精度到秒就够了。
+            static double override_tick_acc = 0.0;
+            if (menu_state.status_override[0] && menu_state.status_override_clear_min > 0) {
+                override_tick_acc += ImGui::GetIO().DeltaTime;
+                while (override_tick_acc >= 1.0 && menu_state.status_override_remaining_sec > 0) {
+                    menu_state.status_override_remaining_sec -= 1;
+                    override_tick_acc -= 1.0;
+                }
+                if (menu_state.status_override_remaining_sec <= 0) {
+                    menu_state.status_override[0]       = 0;
+                    menu_state.status_override_emoji[0] = 0;
+                    override_tick_acc = 0.0;
+                }
+            } else {
+                override_tick_acc = 0.0;
             }
         }
 
@@ -282,10 +304,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
         if (menu_state.service_running) {
             char buf[600];
-            char prefix[96] = "";
-            if (menu_state.show_foreground_app && menu_state.foreground_app[0]) {
-                std::snprintf(prefix, sizeof(prefix), "\xF0\x9F\x8E\xAE %s \xC2\xB7 ", menu_state.foreground_app);
-            }
+            // 用 menu 的统一逻辑算前缀(override > AFK > 前台应用)。
+            std::string prefix_s = menu::EffectiveStatusPrefix(menu_state);
+            const char* prefix = prefix_s.c_str();
             if (menu_state.np_detected && menu_state.np_has_lyrics && current_line.size()) {
                 std::snprintf(buf, sizeof(buf),
                     "%s\xE2\x96\xB6\xEF\xB8\x8F %s - %s\n\xF0\x9F\x8E\xA4 %s",
@@ -297,9 +318,19 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 std::snprintf(buf, sizeof(buf), "%s%s %s - %s [%d:%02d / %d:%02d]",
                               prefix, icon, menu_state.np_title, menu_state.np_artist,
                               p / 60, p % 60, d / 60, d % 60);
+            } else if (!prefix_s.empty()) {
+                // 没音乐但有状态前缀(自定义/AFK/前台):只发状态那一行,
+                // 把末尾 " · " 切掉,显示干净的 "💤 AFK" 或 "🎮 VRChat"。
+                std::string trimmed = prefix_s;
+                // " \xC2\xB7 " 是 " · " 的 UTF-8(共 4 字节)
+                if (trimmed.size() >= 4 &&
+                    trimmed.compare(trimmed.size() - 4, 4, " \xC2\xB7 ") == 0) {
+                    trimmed.resize(trimmed.size() - 4);
+                }
+                std::snprintf(buf, sizeof(buf), "%s", trimmed.c_str());
             } else {
-                std::snprintf(buf, sizeof(buf), "%s\xF0\x9F\x8E\xB5 VRC Lyrics test #%d",
-                              prefix, test_counter);
+                std::snprintf(buf, sizeof(buf), "\xF0\x9F\x8E\xB5 VRC Lyrics test #%d",
+                              test_counter);
             }
             if (chatbox.TrySend(buf)) test_counter++;
         }
