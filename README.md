@@ -5,6 +5,7 @@
 **网易云歌词 → VRChat chatbox 实时推送**
 **v2.0:网易云音频 → VRChat 麦克风(进程级 loopback + VB-Cable)**
 **v3.0:Bilibili 视频解析直链 + 音频中继音质修复**
+**v3.1:Activity 标签升级为状态中心(自定义状态 / AFK / 分类前缀) + 完整 emoji 支持**
 
 C++ + ImGui · 中英繁三语 · 暗亮主题
 
@@ -33,7 +34,11 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
 - 🎬 **Bilibili 视频解析 → VRChat 视频播放器(v3.0 新增)**
   贴 BV 号 / 完整 bilibili 链接 / b23.tv 短链,一键解析出能直接丢进 VRChat 视频播放器的 1440P (2K) 直链。本地 WinHTTP 直连官方 API,不走第三方中转。
 - 🎮 **附加当前前台应用**
-  打游戏时自动加上"🎮 VRChat · 🎵 ...",别人能看到你在干啥。
+  打游戏时自动加上"🎮 VRChat · 🎵 ...",别人能看到你在干啥。v3.1 起按 **应用分类**(游戏/浏览器/聊天/IDE/音乐/办公/创作)用不同 emoji,每类 4 个候选可在 UI 里改。
+- 🪪 **状态中心(v3.1 新增)**
+  Activity 标签升级。自定义状态(🚶 BRB / 💤 睡觉 / 💼 工作中 / 🎬 直播中 一键预设,或自由输入文本,可选 5/30/60 分钟自动清除)、AFK 自动检测(键鼠不动超过阈值就在 chatbox 显示 💤 AFK)、分类 emoji 自定义(带滑动 pill + squash-stretch + halo 动画)。三层优先级:**自定义 > AFK > 前台应用**。
+- 🎭 **完整 emoji 字形(v3.1 修复)**
+  之前 emoji 在某些环境会渲染成 `?`,v3.1 起 ImGui 编译时打开 `IMGUI_USE_WCHAR32`,运行时合并 Windows 自带的 `seguiemj.ttf`,补充平面所有常用 emoji 块都能正确显示(单色 outline,无彩色)。
 - 💿 **旋转专辑封面**
   CD 风格,播放时转、暂停停、切歌带淡入淡出动画。
 - 🌗 **暗色 / 亮色主题一键切**
@@ -233,7 +238,7 @@ src/
 ├── net/winhttp_client.{h,cpp}  # WinHTTP 同步 GET + 不跟随重定向版(v3.0 加,b23.tv 用)
 ├── util/
 │   ├── image.{h,cpp}           # WIC 解码 + 圆形 alpha 蒙版 + D3D11 上传
-│   └── foreground.{h,cpp}      # 前台应用名识别
+│   └── foreground.{h,cpp}      # 前台应用识别(v3.1: 加分类枚举 + 80+ 别名表 + IdleSeconds)
 ├── config/config.{h,cpp}       # JSON 持久化
 └── i18n/i18n.h                 # 三语 t(en, sc, tc)
 
@@ -277,6 +282,9 @@ deps/
 | `audio_gain_db` | float | 中继增益(dB),v3.0 默认从 -6 升到 -3(VRChat 没有自动音量,信号热一点 Opus 信噪比好) |
 | `audio_limiter` | bool | 软限幅器开关,默认开(ceiling -3 dBFS,15% knee tanh,线性区透传) |
 | `audio_autostart` | bool | 网易云一开播就自动启动中继 |
+| `afk_auto` | bool | (v3.1) 键鼠空闲超阈值自动 chatbox 显示 AFK |
+| `afk_threshold_min` | int | (v3.1) AFK 阈值分钟数,默认 5 |
+| `emoji_game`/`emoji_browser`/`emoji_chat`/`emoji_dev`/`emoji_music`/`emoji_office`/`emoji_stream` | string (UTF-8 emoji) | (v3.1) 各分类前缀图标,UI 里可从 4 个候选改 |
 
 ## ⚠ 已知问题
 
