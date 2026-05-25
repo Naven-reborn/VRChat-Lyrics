@@ -34,6 +34,18 @@ static ImU32 Mix(const ImVec4& a, const ImVec4& b, float t) {
     return U32(ImVec4(Lerp(a.x, b.x, t), Lerp(a.y, b.y, t), Lerp(a.z, b.z, t), Lerp(a.w, b.w, t)));
 }
 
+// ImGui 约定:label 里 "##xxx" 之后的内容只参与 ID 生成,渲染时要截掉。我们自家
+// widget 全是手动 AddText,需要自己处理这件事,否则 preset0 / clr 这种 ID 后缀
+// 会直接显示在 UI 上(用户报过 bug)。
+static const char* RenderedTextEnd(const char* label) {
+    const char* p = label;
+    while (*p && !(p[0] == '#' && p[1] == '#')) ++p;
+    return p;
+}
+static ImVec2 CalcRenderedTextSize(const char* label) {
+    return ImGui::CalcTextSize(label, RenderedTextEnd(label));
+}
+
 // 根据 state 选当前的分类 emoji。返回的是指向 state 内部 char[] 的指针。
 static const char* CategoryEmojiFromState(const State& s, util::AppCategory cat) {
     switch (cat) {
@@ -213,8 +225,10 @@ bool NLToggle(const char* label, bool* v) {
     float t_hov = Anim(win->GetID((const void*)((uintptr_t)id ^ 1u)), hovered);
 
     ImU32 txt = Mix(col::text_dim, col::text, ImMax(t_on, t_hov));
-    ImVec2 lsz = ImGui::CalcTextSize(label);
-    win->DrawList->AddText(ImVec2(bb.Min.x, bb.Min.y + (row_h - lsz.y) * 0.5f), txt, label);
+    const char* text_end = RenderedTextEnd(label);
+    ImVec2 lsz = ImGui::CalcTextSize(label, text_end);
+    win->DrawList->AddText(nullptr, 0.f,
+        ImVec2(bb.Min.x, bb.Min.y + (row_h - lsz.y) * 0.5f), txt, label, text_end);
 
     ImVec2 pmin(bb.Max.x - pill_w, bb.Min.y + (row_h - pill_h) * 0.5f);
     ImVec2 pmax(pmin.x + pill_w, pmin.y + pill_h);
@@ -242,7 +256,8 @@ bool NLSliderInt(const char* label, int* v, int v_min, int v_max) {
 
     char buf[32]; std::snprintf(buf, sizeof(buf), "%d", *v);
     ImVec2 vsz = ImGui::CalcTextSize(buf);
-    win->DrawList->AddText(bb.Min, U32(col::text_dim), label);
+    const char* label_end = RenderedTextEnd(label);
+    win->DrawList->AddText(nullptr, 0.f, bb.Min, U32(col::text_dim), label, label_end);
     win->DrawList->AddText(ImVec2(bb.Max.x - vsz.x, bb.Min.y), U32(col::text), buf);
 
     float track_y = bb.Min.y + S(22.f);
@@ -278,11 +293,291 @@ void NLDivider() {
     ImGui::Dummy(ImVec2(w, S(4.f)));
 }
 
+// ----------------------------------------------------------------------------
+// NL 风格输入 / 下拉 / 按钮 —— 跟 NLToggle/NLSliderInt 一套视觉系统
+// ----------------------------------------------------------------------------
+
+// Chevron 下拉箭头 —— combo 右侧用,旋转 open 时翻转 180°
+static void DrawChevron(ImDrawList* dl, ImVec2 c, float size, ImU32 col, float t_open) {
+    float s = size * 0.5f;
+    // t_open 0→1 把箭头从 ▼ 旋成 ▲
+    float dir = 1.f - 2.f * t_open;
+    dl->AddLine(ImVec2(c.x - s * 0.6f, c.y - s * 0.18f * dir),
+                ImVec2(c.x,             c.y + s * 0.32f * dir),
+                col, S(1.6f));
+    dl->AddLine(ImVec2(c.x + s * 0.6f, c.y - s * 0.18f * dir),
+                ImVec2(c.x,             c.y + s * 0.32f * dir),
+                col, S(1.6f));
+}
+
+// 单行输入。draw 路径:
+//   1. push 一组透明 / 与 card 一致的 FrameBg style,让 ImGui::InputText 画的
+//      底色跟我们想要的一致
+//   2. ImGui::InputText 本身做编辑 + caret + IME
+//   3. 拿 GetItemRect* 在底部画一条动画 underline(focused 时 accent,hover 时
+//      dim 的 accent,空闲时透明)
+// 这样能利用 ImGui 完整的文本编辑能力(IME 输入中文也不会丢字)。
+bool NLInputText(const char* id, const char* hint,
+                 char* buf, size_t buf_size, float width) {
+    if (width == 0.f) width = ImGui::GetContentRegionAvail().x;
+    ImGui::SetNextItemWidth(width);
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  col::bg_input);
+    ImGui::PushStyleVar  (ImGuiStyleVar_FramePadding, ImVec2(S(10.f), S(7.f)));
+    ImGui::PushStyleVar  (ImGuiStyleVar_FrameRounding, S(6.f));
+
+    bool changed = hint
+        ? ImGui::InputTextWithHint(id, hint, buf, buf_size)
+        : ImGui::InputText        (id,       buf, buf_size);
+
+    ImVec2 r_min = ImGui::GetItemRectMin();
+    ImVec2 r_max = ImGui::GetItemRectMax();
+    bool   hov   = ImGui::IsItemHovered();
+    bool   focused = ImGui::IsItemActive() || ImGui::IsItemFocused();
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(3);
+
+    // Focus 反馈:沿着输入框轮廓画一圈 accent border,圆角用 FrameRounding,
+    // 这样动画的圆角自动跟输入框一致(原来用底部 underline 时圆角对不上,看着出戏)。
+    ImGuiID anim_id = ImGui::GetCurrentWindow()->GetID((const void*)((uintptr_t)id ^ 0xA110u));
+    float   t       = Anim(anim_id, focused, 16.f);
+    float   alpha   = hov ? ImMax(t, 0.30f) : t;
+    if (alpha > 0.005f) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRect(r_min, r_max, U32(col::accent, alpha),
+                    ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+    }
+    return changed;
+}
+
+bool NLInputTextMultiline(const char* id, const char* hint,
+                          char* buf, size_t buf_size,
+                          float width, float height,
+                          int imgui_flags) {
+    if (width == 0.f) width = ImGui::GetContentRegionAvail().x;
+    ImGui::SetNextItemWidth(width);
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  col::bg_input);
+    ImGui::PushStyleVar  (ImGuiStyleVar_FramePadding, ImVec2(S(10.f), S(7.f)));
+    ImGui::PushStyleVar  (ImGuiStyleVar_FrameRounding, S(6.f));
+
+    bool changed = ImGui::InputTextMultiline(id, buf, buf_size,
+                                              ImVec2(width, height),
+                                              (ImGuiInputTextFlags)imgui_flags);
+    ImVec2 r_min = ImGui::GetItemRectMin();
+    ImVec2 r_max = ImGui::GetItemRectMax();
+    bool   hov     = ImGui::IsItemHovered();
+    bool   focused = ImGui::IsItemActive() || ImGui::IsItemFocused();
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(3);
+
+    // hint placeholder —— 多行版没自带 hint
+    if (hint && buf[0] == 0 && !focused) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddText(ImVec2(r_min.x + S(10.f), r_min.y + S(7.f)),
+                    U32(col::text_dim, 0.7f), hint);
+    }
+
+    ImGuiID anim_id = ImGui::GetCurrentWindow()->GetID((const void*)((uintptr_t)id ^ 0xA111u));
+    float   t       = Anim(anim_id, focused, 16.f);
+    float   alpha   = hov ? ImMax(t, 0.30f) : t;
+    if (alpha > 0.005f) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRect(r_min, r_max, U32(col::accent, alpha),
+                    ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+    }
+    return changed;
+}
+
+// 自定义 Combo:用 ImGui::BeginCombo 拿到 popup 位置 / 模态 / 焦点管理,
+// 但 preview 部分自己画(圆角 + chevron + focus underline + hover bg)。
+bool NLCombo(const char* id, int* current, const char* const* items, int count, float width) {
+    if (width == 0.f) width = ImGui::GetContentRegionAvail().x;
+    ImGui::SetNextItemWidth(width);
+
+    // ImGui::BeginCombo 默认把 preview text 画在框内,这里把它的 frame 配色拉到
+    // 跟我们的 bg_input 一致,然后用 NoArrowButton 关掉 ImGui 自己的箭头,
+    // 之后在右侧补一个自家的 chevron。
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, col::bg_hover);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  col::bg_hover);
+    ImGui::PushStyleColor(ImGuiCol_Button,         col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  col::bg_hover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   col::bg_hover);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,        col::bg_card);
+    ImGui::PushStyleColor(ImGuiCol_Header,         ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered,  col::bg_hover);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,   col::bg_hover);
+    ImGui::PushStyleVar  (ImGuiStyleVar_FramePadding, ImVec2(S(10.f), S(7.f)));
+    ImGui::PushStyleVar  (ImGuiStyleVar_FrameRounding, S(6.f));
+    ImGui::PushStyleVar  (ImGuiStyleVar_PopupRounding, S(8.f));
+    ImGui::PushStyleVar  (ImGuiStyleVar_ItemSpacing, ImVec2(S(4.f), S(2.f)));
+    ImGui::PushStyleVar  (ImGuiStyleVar_WindowPadding, ImVec2(S(4.f), S(6.f)));
+
+    const char* preview = (count > 0 && *current >= 0 && *current < count) ? items[*current] : "";
+    bool changed = false;
+    bool open = ImGui::BeginCombo(id, preview, ImGuiComboFlags_NoArrowButton);
+
+    ImVec2 r_min = ImGui::GetItemRectMin();
+    ImVec2 r_max = ImGui::GetItemRectMax();
+    bool   hov   = ImGui::IsItemHovered();
+
+    // chevron 右内嵌 + 圆角 accent border 表达 focus 状态
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGuiID anim_id = ImGui::GetCurrentWindow()->GetID((const void*)((uintptr_t)id ^ 0xC0DEu));
+        float   t_open  = Anim(anim_id, open, 18.f);
+        ImVec2  cc(r_max.x - S(14.f), (r_min.y + r_max.y) * 0.5f);
+        DrawChevron(dl, cc, S(14.f), U32(col::text_dim), t_open);
+        // 圆角 border 跟着 FrameRounding,跟 NLInputText 一致
+        float alpha = ImMax(t_open, hov ? 0.30f : 0.f);
+        if (alpha > 0.005f) {
+            dl->AddRect(r_min, r_max, U32(col::accent, alpha),
+                        ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+        }
+    }
+
+    if (open) {
+        for (int i = 0; i < count; ++i) {
+            bool sel = (i == *current);
+            ImGui::PushID(i);
+            if (ImGui::Selectable(items[i] ? items[i] : "", sel,
+                                  ImGuiSelectableFlags_DontClosePopups)) {
+                *current = i;
+                changed = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::PopStyleVar(5);
+    ImGui::PopStyleColor(10);
+    return changed;
+}
+
+// NL Button —— hover scale + press 下沉 + accent halo。
+// accent=true 用主色;danger=true 优先用红色;否则用 input 配色。
+// disabled=true 灰一档且点击无效。
+bool NLButton(const char* label, float width, float height,
+              bool accent, bool danger, bool disabled) {
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (win->SkipItems) return false;
+
+    if (width == 0.f)  width  = ImGui::GetContentRegionAvail().x;
+    if (height == 0.f) height = S(36.f);
+
+    ImGuiID id = win->GetID(label);
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImRect bb(origin, ImVec2(origin.x + width, origin.y + height));
+    ImGui::ItemSize(bb);
+    if (!ImGui::ItemAdd(bb, id)) return false;
+
+    bool hovered = false, held = false;
+    bool pressed = false;
+    if (!disabled) {
+        pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+    } else {
+        // 仍画出 disabled 的视觉效果,但 ButtonBehavior 不调
+        hovered = false;
+        held    = false;
+    }
+
+    // 动画 state
+    float t_hov   = Anim(win->GetID((const void*)((uintptr_t)id ^ 0xA001u)), hovered);
+    float t_press = Anim(win->GetID((const void*)((uintptr_t)id ^ 0xA002u)), held, 22.f);
+    // halo:松开瞬间从 1 渐衰 0,衰减时间 350ms
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    ImGuiID halo_id  = win->GetID((const void*)((uintptr_t)id ^ 0xA003u));
+    float halo = st->GetFloat(halo_id, 0.f);
+    if (pressed) halo = 1.f;
+    halo -= ImGui::GetIO().DeltaTime / 0.35f;
+    if (halo < 0.f) halo = 0.f;
+    st->SetFloat(halo_id, halo);
+
+    // 按下时盒子下沉 1px,模拟物理点击
+    float dy = t_press * S(1.f);
+    ImVec2 bmin(bb.Min.x, bb.Min.y + dy);
+    ImVec2 bmax(bb.Max.x, bb.Max.y + dy);
+
+    // 配色
+    ImVec4 base_bg, hover_bg, text_col;
+    if (disabled) {
+        base_bg  = ImVec4(0.30f, 0.34f, 0.40f, 1.f);
+        hover_bg = base_bg;
+        text_col = ImVec4(0.55f, 0.60f, 0.66f, 1.f);
+    } else if (danger) {
+        base_bg  = ImVec4(0.65f, 0.25f, 0.30f, 1.f);
+        hover_bg = ImVec4(0.78f, 0.30f, 0.35f, 1.f);
+        text_col = ImVec4(0.05f, 0.07f, 0.10f, 1.f);
+    } else if (accent) {
+        base_bg  = col::accent;
+        hover_bg = ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f);
+        text_col = ImVec4(0.05f, 0.07f, 0.10f, 1.f);
+    } else {
+        base_bg  = col::bg_input;
+        hover_bg = col::bg_hover;
+        text_col = col::text;
+    }
+    ImU32 bg_u32 = Mix(base_bg, hover_bg, t_hov);
+
+    // halo glow(只 accent / danger 显眼,普通按钮关掉避免视觉污染)
+    if (halo > 0.005f && (accent || danger)) {
+        float p_inv = 1.f - halo;
+        float ease  = 1.f - p_inv * p_inv * p_inv;
+        float halo_extra = S(7.f) * ease;
+        ImVec4 glow = (danger ? ImVec4(0.85f, 0.30f, 0.35f, 0.f) : col::accent);
+        glow.w = ease * 0.45f;
+        win->DrawList->AddRectFilled(
+            ImVec2(bmin.x - halo_extra, bmin.y - halo_extra),
+            ImVec2(bmax.x + halo_extra, bmax.y + halo_extra),
+            ImGui::ColorConvertFloat4ToU32(glow), S(10.f));
+    }
+
+    win->DrawList->AddRectFilled(bmin, bmax, bg_u32, S(6.f));
+
+    // hover 边亮一圈(非 accent 才显)
+    if (!accent && !danger && !disabled && t_hov > 0.01f) {
+        ImVec4 stroke_c = col::accent; stroke_c.w = t_hov * 0.55f;
+        win->DrawList->AddRect(bmin, bmax, ImGui::ColorConvertFloat4ToU32(stroke_c),
+                               S(6.f), 0, S(1.f));
+    }
+
+    const char* label_end = RenderedTextEnd(label);
+    ImVec2 lsz = ImGui::CalcTextSize(label, label_end);
+    ImVec2 lpos((bmin.x + bmax.x - lsz.x) * 0.5f, (bmin.y + bmax.y - lsz.y) * 0.5f);
+    win->DrawList->AddText(nullptr, 0.f, lpos, U32(text_col), label, label_end);
+    return pressed && !disabled;
+}
+
 static void SectionTitle(const char* upper_title) {
     ImGui::Dummy(ImVec2(0, S(4.f)));
     ImGui::PushFont(font_caption);
+
     ImVec2 p = ImGui::GetCursorScreenPos();
-    ImGui::GetWindowDrawList()->AddText(p, U32(col::text_caption), upper_title);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // 标题 caps,后面接 hairline rule 一直拉到内容区右沿。
+    dl->AddText(p, U32(col::text_caption), upper_title);
+    ImVec2 title_sz = ImGui::CalcTextSize(upper_title);
+
+    float rule_x = p.x + title_sz.x + S(10.f);
+    float rule_right = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x
+                       - ImGui::GetStyle().WindowPadding.x;
+    float rule_y = p.y + title_sz.y * 0.5f - S(0.5f);
+    if (rule_right > rule_x + S(8.f)) {
+        dl->AddRectFilled(ImVec2(rule_x, rule_y),
+                          ImVec2(rule_right, rule_y + S(1.f)),
+                          U32(col::stroke));
+    }
+
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, S(12.f)));
 }
@@ -290,8 +585,27 @@ static void SectionTitle(const char* upper_title) {
 // 用 ImDrawList 的通道切分实现卡片背景,不用 BeginChild —— child window 在
 // 这个版本的 ImGui 上会拦截鼠标事件导致按钮点不动(踩过这个坑)。
 static ImVec2 g_card_start;
+// 卡片序号:DrawXxx 在每帧 / 每次 tab 切换时 reset,CardBegin 自增。
+// 用来给 staggered slide-in 加索引,卡片越靠下出现得越晚。
+static int    g_card_index = 0;
+// 跨函数共享的"tab 过渡进度",由 Draw() 在每帧设好,CardBegin 读到来算自家的
+// stagger 子进度。
+static float  g_tab_anim_t = 1.f;
+// 单卡片当前的 X 缩进(stagger 用),CardEnd 用它来 Unindent 对消。
+static float  g_card_extra_indent = 0.f;
 
 static void CardBegin(const char* /*id*/) {
+    // staggered slide-in:每张卡片在 tab 过渡里有一段 180ms 的子窗口,
+    // 卡片越靠后开始得越晚,横向偏移 + 自身 alpha 渐入。
+    float start = (float)g_card_index * 0.07f;
+    float local = (g_tab_anim_t - start) / 0.22f;
+    if (local < 0.f) local = 0.f;
+    if (local > 1.f) local = 1.f;
+    float u    = 1.f - local;
+    float ease = 1.f - u * u * u;          // ease-out cubic
+    g_card_extra_indent = (1.f - ease) * S(18.f);
+    if (g_card_extra_indent > 0.01f) ImGui::Indent(g_card_extra_indent);
+
     g_card_start = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->ChannelsSplit(2);
@@ -314,7 +628,60 @@ static void CardEnd() {
     dl->AddRectFilled(r_min, r_max, U32(col::bg_card), S(8.f));
     dl->ChannelsMerge();
 
+    if (g_card_extra_indent > 0.01f) ImGui::Unindent(g_card_extra_indent);
+    g_card_extra_indent = 0.f;
+
     ImGui::Dummy(ImVec2(0, S(10.f)));
+    g_card_index++;
+}
+
+// 状态点(● / ○ 的替代)。
+// active=true 时画一颗充满 + 呼吸 pulse;false 时空心暗淡。
+// 调用方需要自己安排好 cursor 位置 —— 此函数只画,不动 cursor。
+// 返回值是 dot 的右边沿 x,用来后接 label 文本。
+static float DrawStatusDot(ImVec2 origin, float radius, bool active, ImU32 col_on, ImU32 col_off) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 c(origin.x + radius, origin.y + radius);
+    if (active) {
+        // 呼吸 pulse:用 ImGui 的时间累计做正弦,1.4s 一个周期
+        double t_now = ImGui::GetTime();
+        float pulse = 0.5f + 0.5f * (float)std::sin(t_now * 4.488f);  // 2π/1.4
+        // 外环 halo
+        ImVec4 halo = ImGui::ColorConvertU32ToFloat4(col_on);
+        halo.w *= 0.18f + 0.22f * pulse;
+        dl->AddCircleFilled(c, radius * (1.55f + pulse * 0.25f),
+                            ImGui::ColorConvertFloat4ToU32(halo), 20);
+        dl->AddCircleFilled(c, radius, col_on, 16);
+    } else {
+        dl->AddCircle(c, radius, col_off, 16, S(1.4f));
+    }
+    return c.x + radius;
+}
+
+// 渲染一行 "[●/○] label" 文本,带 dot pulse。row 的高度等于当前 font line height。
+static void StatusRow(bool active, const char* label, ImVec4 active_color, ImVec4 inactive_color) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float dot_r = S(4.f);
+    float text_h = ImGui::GetTextLineHeight();
+    DrawStatusDot(ImVec2(p.x, p.y + (text_h * 0.5f - dot_r)), dot_r,
+                  active, U32(active_color), U32(inactive_color));
+    ImGui::GetWindowDrawList()->AddText(
+        ImVec2(p.x + dot_r * 2.f + S(6.f), p.y),
+        active ? U32(active_color) : U32(inactive_color), label);
+    ImGui::Dummy(ImVec2(0, text_h));
+}
+
+// 进度条:fraction 走低通滤波,看起来有惯性。每帧调一次,storage_key 必须稳定。
+static float AnimatedFraction(ImGuiID storage_key, float target) {
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    float cur = st->GetFloat(storage_key, target);
+    float dt  = ImGui::GetIO().DeltaTime;
+    if (dt > 0.05f) dt = 0.05f;
+    // 跟随系数 10/sec,大跳的时候 ~300ms 跟上
+    cur += (target - cur) * (1.f - std::exp(-10.f * dt));
+    if (std::fabs(target - cur) < 1.f / 2048.f) cur = target;
+    st->SetFloat(storage_key, cur);
+    return cur;
 }
 
 static void DrawTitleBarContent(State& s, int win_w) {
@@ -410,6 +777,10 @@ static void DrawTitleBarContent(State& s, int win_w) {
     dl->AddRectFilled(ImVec2(0.f, h), ImVec2((float)win_w, h + S(1.f)), U32(col::stroke));
 }
 
+static float g_sidebar_tab_ys[8] = {};
+static int   g_sidebar_tab_count = 0;
+static float g_sidebar_indicator_y = -1.f;  // 已动画到的 Y(始终是当前帧的渲染值)
+
 static bool SidebarTab(const char* label, void(*icon)(ImDrawList*, ImVec2, float, ImU32), bool selected) {
     ImGuiWindow* win = ImGui::GetCurrentWindow();
     ImGuiID id = win->GetID(label);
@@ -420,29 +791,54 @@ static bool SidebarTab(const char* label, void(*icon)(ImDrawList*, ImVec2, float
     ImGui::ItemSize(bb);
     if (!ImGui::ItemAdd(bb, id)) return false;
 
+    // 记录这个 tab 的 Y,后面统一画一根 sliding indicator。
+    if (g_sidebar_tab_count < (int)IM_ARRAYSIZE(g_sidebar_tab_ys)) {
+        g_sidebar_tab_ys[g_sidebar_tab_count++] = bb.Min.y;
+    }
+
     bool hovered, held;
     bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
 
-    float t_sel = Anim(id, selected);
     float t_hov = Anim(win->GetID((const void*)((uintptr_t)id ^ 2u)), hovered || selected);
 
     if (t_hov > 0.01f && !selected)
         win->DrawList->AddRectFilled(bb.Min, bb.Max, U32(col::bg_hover, t_hov * 0.45f), 0.f);
 
-    if (t_sel > 0.01f)
-        win->DrawList->AddRectFilled(
-            ImVec2(bb.Min.x, bb.Min.y + S(8.f)),
-            ImVec2(bb.Min.x + S(3.f), bb.Max.y - S(8.f)),
-            U32(col::accent, t_sel), S(1.5f));
-
-    ImU32 fg = Mix(col::text_dim, col::text, ImMax(t_sel, t_hov * 0.6f));
+    ImU32 fg = Mix(col::text_dim, col::text, selected ? 1.f : t_hov * 0.6f);
     icon(win->DrawList, ImVec2(bb.Min.x + S(22.f), (bb.Min.y + bb.Max.y) * 0.5f), S(16.f), fg);
 
     ImGui::PushFont(font_body);
-    ImVec2 lsz = ImGui::CalcTextSize(label);
-    win->DrawList->AddText(ImVec2(bb.Min.x + S(40.f), (bb.Min.y + bb.Max.y - lsz.y) * 0.5f), fg, label);
+    const char* label_end = RenderedTextEnd(label);
+    ImVec2 lsz = ImGui::CalcTextSize(label, label_end);
+    win->DrawList->AddText(nullptr, 0.f,
+        ImVec2(bb.Min.x + S(40.f), (bb.Min.y + bb.Max.y - lsz.y) * 0.5f),
+        fg, label, label_end);
     ImGui::PopFont();
     return pressed;
+}
+
+// 在 sidebar 所有 tab 都绘制完之后调,统一画一个会滑动的 accent 高亮条。
+static void DrawSidebarIndicator(int current_tab_idx) {
+    if (g_sidebar_tab_count == 0) return;
+    if (current_tab_idx < 0) current_tab_idx = 0;
+    if (current_tab_idx >= g_sidebar_tab_count) current_tab_idx = g_sidebar_tab_count - 1;
+
+    float target_y = g_sidebar_tab_ys[current_tab_idx];
+
+    // 第一帧初始化:别让它从 0 滑过来,直接 snap 到位。
+    if (g_sidebar_indicator_y < 0.f) g_sidebar_indicator_y = target_y;
+
+    float dt = ImGui::GetIO().DeltaTime;
+    if (dt > 0.05f) dt = 0.05f;
+    g_sidebar_indicator_y += (target_y - g_sidebar_indicator_y) * (1.f - std::exp(-18.f * dt));
+    if (std::fabs(target_y - g_sidebar_indicator_y) < 0.5f) g_sidebar_indicator_y = target_y;
+
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    float h = S(34.f);
+    win->DrawList->AddRectFilled(
+        ImVec2(win->Pos.x, g_sidebar_indicator_y + S(8.f)),
+        ImVec2(win->Pos.x + S(3.f), g_sidebar_indicator_y + h - S(8.f)),
+        U32(col::accent), S(1.5f));
 }
 
 static void DrawLyrics(State& s) {
@@ -459,9 +855,20 @@ static void DrawLyrics(State& s) {
                            s.np_artist,
                            (s.np_artist[0] && s.np_album[0]) ? " · " : "",
                            s.np_album);
-        ImGui::TextColored(col::text_dim, "%s %s",
-                           i18n::t("Track ID:", "曲目 ID:", "曲目 ID:"),
-                           s.np_ncm_id[0] ? s.np_ncm_id : "-");
+        const char* src_label =
+            s.np_source == 1 ? "NetEase Cloud" :
+            s.np_source == 2 ? "Spotify"       :
+            s.np_source == 3 ? "YouTube Music" : "Other";
+        if (s.np_source == 1) {
+            ImGui::TextColored(col::text_dim, "%s · %s %s",
+                               src_label,
+                               i18n::t("Track ID:", "曲目 ID:", "曲目 ID:"),
+                               s.np_ncm_id[0] ? s.np_ncm_id : "-");
+        } else {
+            ImGui::TextColored(col::text_dim, "%s %s",
+                               i18n::t("Source:", "来源:", "來源:"),
+                               src_label);
+        }
         int p = s.np_pos_ms / 1000, d = s.np_dur_ms / 1000;
         ImGui::TextColored(col::text_dim, "%02d:%02d / %02d:%02d  (%s)",
                            p / 60, p % 60, d / 60, d % 60,
@@ -482,11 +889,11 @@ static void DrawLyrics(State& s) {
         }
     } else {
         ImGui::TextColored(col::text_dim, "Artist · Album");
-        ImGui::TextColored(col::text_dim, "Track ID: -");
+        ImGui::TextColored(col::text_dim, "Source: -");
         ImGui::TextColored(col::text_dim, "%s",
-            i18n::t("Open netease cloud music + inflink-rs plugin",
-                    "请打开网易云音乐 + inflink-rs 插件",
-                    "請開啟網易雲音樂 + inflink-rs 插件"));
+            i18n::t("Open NetEase / Spotify / YouTube Music. NetEase needs inflink-rs for direct ID match.",
+                    "打开网易云 / Spotify / YouTube Music。网易云装 inflink-rs 插件可直接按 ID 查",
+                    "開啟網易雲 / Spotify / YouTube Music。網易雲裝 inflink-rs 外掛可直接按 ID 查"));
     }
     ImGui::PopFont();
 
@@ -508,21 +915,13 @@ static void DrawLyrics(State& s) {
     const char* btn_label = s.service_running
         ? i18n::t("Stop", "停止", "停止")
         : i18n::t("Start", "启动", "啟動");
-    float btn_w = ImGui::GetContentRegionAvail().x;
-    float btn_h = S(36.f);
-    ImGui::PushStyleColor(ImGuiCol_Button,
-        s.service_running ? ImVec4(0.65f, 0.25f, 0.30f, 1.f) : col::accent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-        s.service_running ? ImVec4(0.78f, 0.30f, 0.35f, 1.f) :
-        ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-        s.service_running ? ImVec4(0.55f, 0.20f, 0.25f, 1.f) :
-        ImVec4(col::accent.x * 0.85f, col::accent.y * 0.85f, col::accent.z * 0.85f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.07f, 0.10f, 1.f));
+    float btn_w = ImGui::GetContentRegionAvail().x - S(14.f);
     ImGui::PushFont(font_medium);
-    if (ImGui::Button(btn_label, ImVec2(btn_w, btn_h))) s.service_running = !s.service_running;
+    if (NLButton(btn_label, btn_w, S(36.f),
+                 /*accent*/!s.service_running, /*danger*/s.service_running)) {
+        s.service_running = !s.service_running;
+    }
     ImGui::PopFont();
-    ImGui::PopStyleColor(4);
 
     ImGui::Dummy(ImVec2(0, S(4.f)));
     NLToggle(i18n::t("Send while paused", "暂停时仍发送", "暫停時仍傳送"), &s.send_while_paused);
@@ -729,8 +1128,7 @@ static void DrawActivity(State& s) {
     ImGui::Dummy(ImVec2(0, S(4.f)));
 
     // 文本输入框
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::InputTextWithHint("##status_text",
+    if (NLInputText("##status_text",
             i18n::t("e.g. \"in a meeting\", \"studying\", \"AFK 20m\"",
                     "\xE4\xBE\x8B\xE5\xA6\x82 \"\xE5\xBC\x80\xE4\xBC\x9A\xE4\xB8\xAD\" / \"\xE5\xAD\xA6\xE4\xB9\xA0\xE4\xB8\xAD\" / \"AFK 20\xE5\x88\x86\"",
                     "\xE4\xBE\x8B\xE5\xA6\x82 \"\xE9\x96\x8B\xE6\x9C\x83\xE4\xB8\xAD\" / \"\xE5\xAD\xB8\xE7\xBF\x92\xE4\xB8\xAD\" / \"AFK 20\xE5\x88\x86\""),
@@ -759,7 +1157,7 @@ static void DrawActivity(State& s) {
                       i18n::current == i18n::Lang::SC ? presets[i].sc :
                       i18n::current == i18n::Lang::TC ? presets[i].tc : presets[i].en,
                       i);
-        if (ImGui::Button(lbl, ImVec2(btn_w, S(28.f)))) {
+        if (NLButton(lbl, btn_w, S(28.f), /*accent*/false)) {
             std::snprintf(s.status_override, sizeof(s.status_override), "%s",
                           i18n::current == i18n::Lang::SC ? presets[i].sc :
                           i18n::current == i18n::Lang::TC ? presets[i].tc : presets[i].en);
@@ -768,16 +1166,14 @@ static void DrawActivity(State& s) {
         }
     }
     ImGui::SameLine(0, S(4.f));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.34f, 0.40f, 1.f));
-    if (ImGui::Button(i18n::t("Clear##preset_clr",
-                              "\xE6\xB8\x85\xE9\x99\xA4##preset_clr",
-                              "\xE6\xB8\x85\xE9\x99\xA4##preset_clr"),
-                      ImVec2(btn_w, S(28.f)))) {
+    if (NLButton(i18n::t("Clear##preset_clr",
+                         "\xE6\xB8\x85\xE9\x99\xA4##preset_clr",
+                         "\xE6\xB8\x85\xE9\x99\xA4##preset_clr"),
+                 btn_w, S(28.f), /*accent*/false, /*danger*/true)) {
         s.status_override[0]       = 0;
         s.status_override_emoji[0] = 0;
         s.status_override_remaining_sec = 0;
     }
-    ImGui::PopStyleColor();
 
     // 自动清除倒计时下拉
     ImGui::Dummy(ImVec2(0, S(4.f)));
@@ -796,8 +1192,7 @@ static void DrawActivity(State& s) {
     const char** clear_labels =
         i18n::current == i18n::Lang::SC ? clear_sc :
         i18n::current == i18n::Lang::TC ? clear_tc : clear_en;
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::Combo("##clear_combo", &cur_idx, clear_labels, 4)) {
+    if (NLCombo("##clear_combo", &cur_idx, clear_labels, 4)) {
         s.status_override_clear_min = clear_vals[cur_idx];
         s.status_override_remaining_sec = s.status_override_clear_min * 60;
     }
@@ -910,25 +1305,28 @@ static void DrawAudio(State& s) {
     ImVec4 ok_col(0.40f, 0.86f, 0.50f, 1.f);
     ImVec4 bad_col(0.85f, 0.55f, 0.30f, 1.f);
 
-    ImGui::TextColored(s.audio_netease_detected ? ok_col : bad_col,
-        s.audio_netease_detected
-            ? i18n::t("\xE2\x97\x8F Netease detected",
-                      "\xE2\x97\x8F \xE7\xBD\x91\xE6\x98\x93\xE4\xBA\x91\xE5\xB7\xB2\xE6\xA3\x80\xE6\xB5\x8B",
-                      "\xE2\x97\x8F \xE7\xB6\xB2\xE6\x98\x93\xE9\x9B\xB2\xE5\xB7\xB2\xE5\x81\xB5\xE6\xB8\xAC")
-            : i18n::t("\xE2\x97\x8B Netease not running",
-                      "\xE2\x97\x8B \xE7\xBD\x91\xE6\x98\x93\xE4\xBA\x91\xE6\x9C\xAA\xE8\xBF\x90\xE8\xA1\x8C",
-                      "\xE2\x97\x8B \xE7\xB6\xB2\xE6\x98\x93\xE9\x9B\xB2\xE6\x9C\xAA\xE9\x81\x8B\xE8\xA1\x8C"));
-    ImGui::TextColored(s.audio_vbcable_installed ? ok_col : bad_col,
-        s.audio_vbcable_installed
-            ? i18n::t("\xE2\x97\x8F VB-Cable installed",
-                      "\xE2\x97\x8F VB-Cable \xE5\xB7\xB2\xE5\xAE\x89\xE8\xA3\x85",
-                      "\xE2\x97\x8F VB-Cable \xE5\xB7\xB2\xE5\xAE\x89\xE8\xA3\x9D")
-            : i18n::t("\xE2\x97\x8B VB-Cable not installed",
-                      "\xE2\x97\x8B VB-Cable \xE6\x9C\xAA\xE5\xAE\x89\xE8\xA3\x85",
-                      "\xE2\x97\x8B VB-Cable \xE6\x9C\xAA\xE5\xAE\x89\xE8\xA3\x9D"));
+    StatusRow(s.audio_netease_detected,
+              s.audio_netease_detected
+                  ? i18n::t("Netease detected",
+                            "\xE7\xBD\x91\xE6\x98\x93\xE4\xBA\x91\xE5\xB7\xB2\xE6\xA3\x80\xE6\xB5\x8B",
+                            "\xE7\xB6\xB2\xE6\x98\x93\xE9\x9B\xB2\xE5\xB7\xB2\xE5\x81\xB5\xE6\xB8\xAC")
+                  : i18n::t("Netease not running",
+                            "\xE7\xBD\x91\xE6\x98\x93\xE4\xBA\x91\xE6\x9C\xAA\xE8\xBF\x90\xE8\xA1\x8C",
+                            "\xE7\xB6\xB2\xE6\x98\x93\xE9\x9B\xB2\xE6\x9C\xAA\xE9\x81\x8B\xE8\xA1\x8C"),
+              ok_col, bad_col);
+    StatusRow(s.audio_vbcable_installed,
+              s.audio_vbcable_installed
+                  ? i18n::t("VB-Cable installed",
+                            "VB-Cable \xE5\xB7\xB2\xE5\xAE\x89\xE8\xA3\x85",
+                            "VB-Cable \xE5\xB7\xB2\xE5\xAE\x89\xE8\xA3\x9D")
+                  : i18n::t("VB-Cable not installed",
+                            "VB-Cable \xE6\x9C\xAA\xE5\xAE\x89\xE8\xA3\x85",
+                            "VB-Cable \xE6\x9C\xAA\xE5\xAE\x89\xE8\xA3\x9D"),
+              ok_col, bad_col);
     if (s.audio_relay_running) {
-        ImGui::TextColored(ok_col, "\xE2\x97\x8F %s",
-            i18n::t("Relay running", "中继运行中", "中繼運行中"));
+        StatusRow(true,
+                  i18n::t("Relay running", "中继运行中", "中繼運行中"),
+                  ok_col, bad_col);
     }
     if (s.audio_status_text[0]) {
         ImGui::TextColored(col::text_dim, "%s", s.audio_status_text);
@@ -950,22 +1348,15 @@ static void DrawAudio(State& s) {
 
         bool busy = (s.audio_install_step >= 0 && s.audio_install_step <= 4);
         if (!busy) {
-            float w = ImGui::GetContentRegionAvail().x;
-            ImGui::PushStyleColor(ImGuiCol_Button, col::accent);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                ImVec4(col::accent.x * 0.85f, col::accent.y * 0.85f, col::accent.z * 0.85f, 1.f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.07f, 0.10f, 1.f));
+            float w = ImGui::GetContentRegionAvail().x - S(14.f);
             ImGui::PushFont(font_medium);
             const char* lbl = (s.audio_install_step == (int)6 /*Failed*/)
                 ? i18n::t("Retry install", "\xE9\x87\x8D\xE8\xAF\x95\xE5\xAE\x89\xE8\xA3\x85", "\xE9\x87\x8D\xE8\xA9\xA6\xE5\xAE\x89\xE8\xA3\x9D")
                 : i18n::t("Download and install", "\xE4\xB8\x8B\xE8\xBD\xBD\xE5\xB9\xB6\xE5\xAE\x89\xE8\xA3\x85", "\xE4\xB8\x8B\xE8\xBC\x89\xE4\xB8\xA6\xE5\xAE\x89\xE8\xA3\x9D");
-            if (ImGui::Button(lbl, ImVec2(w, S(34.f)))) {
+            if (NLButton(lbl, w, S(34.f), /*accent*/true)) {
                 s.audio_install_request = true;
             }
             ImGui::PopFont();
-            ImGui::PopStyleColor(4);
         }
 
         if (s.audio_install_step >= 0) {
@@ -985,8 +1376,11 @@ static void DrawAudio(State& s) {
                 case 6: frac = s.audio_install_fraction; break; // Failed
                 default: break;
             }
-            if (frac > 0.f) {
-                dl->AddRectFilled(p, ImVec2(p.x + w * frac, p.y + S(6.f)),
+            // 安装步骤是离散跳变(0.1→0.5→0.6→0.7→0.9→1.0),走低通滤波
+            // 看起来才有连贯性,不至于一段段卡帧。
+            float anim_frac = AnimatedFraction(ImGui::GetID("##install_frac"), frac);
+            if (anim_frac > 0.f) {
+                dl->AddRectFilled(p, ImVec2(p.x + w * anim_frac, p.y + S(6.f)),
                                   U32(s.audio_install_step == 6 ? ImVec4(0.85f, 0.45f, 0.40f, 1.f) : col::accent),
                                   S(3.f));
             }
@@ -1031,7 +1425,7 @@ static void DrawAudio(State& s) {
     }
     ImGui::SetNextItemWidth(-S(80.f));
     if (s.audio_device_count > 0) {
-        if (ImGui::Combo("##audio_dev", &current_idx, item_ptrs, s.audio_device_count)) {
+        if (NLCombo("##audio_dev", &current_idx, item_ptrs, s.audio_device_count, ImGui::GetContentRegionAvail().x - S(80.f))) {
             if (current_idx >= 0 && current_idx < s.audio_device_count) {
                 cstr_copy(s.audio_target_device_id,    sizeof(s.audio_target_device_id),    s.audio_devices[current_idx].id);
                 cstr_copy(s.audio_target_device_label, sizeof(s.audio_target_device_label), s.audio_devices[current_idx].label);
@@ -1042,7 +1436,8 @@ static void DrawAudio(State& s) {
             i18n::t("(no devices)", "(\xE6\x97\xA0\xE8\xAE\xBE\xE5\xA4\x87)", "(\xE7\x84\xA1\xE8\xA3\x9D\xE7\xBD\xAE)"));
     }
     ImGui::SameLine();
-    if (ImGui::Button(i18n::t("Refresh", "\xE5\x88\xB7\xE6\x96\xB0", "\xE5\x88\xB7\xE6\x96\xB0"), ImVec2(S(70.f), 0))) {
+    if (NLButton(i18n::t("Refresh", "\xE5\x88\xB7\xE6\x96\xB0", "\xE5\x88\xB7\xE6\x96\xB0"),
+                 S(70.f), S(34.f), /*accent*/false)) {
         s.audio_refresh_request = true;
     }
     CardEnd();
@@ -1053,27 +1448,18 @@ static void DrawAudio(State& s) {
     const char* btn_label = s.audio_relay_running
         ? i18n::t("Stop relay", "\xE5\x81\x9C\xE6\xAD\xA2\xE4\xB8\xAD\xE7\xBB\xA7", "\xE5\x81\x9C\xE6\xAD\xA2\xE4\xB8\xAD\xE7\xB9\xBC")
         : i18n::t("Start relay", "\xE5\x90\xAF\xE5\x8A\xA8\xE4\xB8\xAD\xE7\xBB\xA7", "\xE5\x95\x9F\xE5\x8B\x95\xE4\xB8\xAD\xE7\xB9\xBC");
-    float btn_w = ImGui::GetContentRegionAvail().x;
+    float btn_w = ImGui::GetContentRegionAvail().x - S(14.f);
     float btn_h = S(36.f);
     bool can_start = s.audio_vbcable_installed && s.audio_netease_detected && s.audio_target_device_id[0];
-    ImGui::PushStyleColor(ImGuiCol_Button,
-        s.audio_relay_running ? ImVec4(0.65f, 0.25f, 0.30f, 1.f)
-                              : (can_start ? col::accent : ImVec4(0.30f, 0.34f, 0.40f, 1.f)));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-        s.audio_relay_running ? ImVec4(0.78f, 0.30f, 0.35f, 1.f) :
-        (can_start ? ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f)
-                   : ImVec4(0.32f, 0.36f, 0.42f, 1.f)));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-        s.audio_relay_running ? ImVec4(0.55f, 0.20f, 0.25f, 1.f) :
-        ImVec4(col::accent.x * 0.85f, col::accent.y * 0.85f, col::accent.z * 0.85f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.07f, 0.10f, 1.f));
     ImGui::PushFont(font_medium);
-    if (ImGui::Button(btn_label, ImVec2(btn_w, btn_h))) {
+    if (NLButton(btn_label, btn_w, btn_h,
+                 /*accent*/!s.audio_relay_running && can_start,
+                 /*danger*/s.audio_relay_running,
+                 /*disabled*/!s.audio_relay_running && !can_start)) {
         if (s.audio_relay_running) s.audio_stop_request = true;
         else if (can_start)        s.audio_start_request = true;
     }
     ImGui::PopFont();
-    ImGui::PopStyleColor(4);
 
     ImGui::Dummy(ImVec2(0, S(4.f)));
     {
@@ -1171,23 +1557,15 @@ static void DrawVideoTab(State& s) {
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, S(6.f)));
 
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##video_in",
+    NLInputText("##video_in",
         "BV1xx411c7mu  /  https://www.bilibili.com/video/...  /  https://b23.tv/...",
-        s.video_input, sizeof(s.video_input));
+        s.video_input, sizeof(s.video_input),
+        ImGui::GetContentRegionAvail().x - S(14.f));  // 右边内缩 14px,跟卡片里其它内容(如进度条)对齐
 
     ImGui::Dummy(ImVec2(0, S(4.f)));
     bool busy = (s.video_status == 1);
-    float btn_w = ImGui::GetContentRegionAvail().x;
+    float btn_w = ImGui::GetContentRegionAvail().x - S(14.f);
     float btn_h = S(36.f);
-    ImGui::PushStyleColor(ImGuiCol_Button,
-        busy ? ImVec4(0.30f, 0.34f, 0.40f, 1.f) : col::accent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-        busy ? ImVec4(0.32f, 0.36f, 0.42f, 1.f)
-             : ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-        ImVec4(col::accent.x * 0.85f, col::accent.y * 0.85f, col::accent.z * 0.85f, 1.f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.07f, 0.10f, 1.f));
     ImGui::PushFont(font_medium);
     const char* btn_label = busy
         ? i18n::t("Parsing...",
@@ -1196,11 +1574,11 @@ static void DrawVideoTab(State& s) {
         : i18n::t("Parse",
                   "\xE8\xA7\xA3\xE6\x9E\x90",
                   "\xE8\xA7\xA3\xE6\x9E\x90");
-    if (ImGui::Button(btn_label, ImVec2(btn_w, btn_h)) && !busy && s.video_input[0]) {
+    if (NLButton(btn_label, btn_w, btn_h, /*accent*/!busy, /*danger*/false, /*disabled*/busy) &&
+        !busy && s.video_input[0]) {
         s.video_parse_request = true;
     }
     ImGui::PopFont();
-    ImGui::PopStyleColor(4);
     CardEnd();
 
     SectionTitle(i18n::t("RESULT",
@@ -1217,16 +1595,18 @@ static void DrawVideoTab(State& s) {
                     "\xE6\xAD\xA3\xE5\x9C\xA8\xE8\xA7\xA3\xE6\x9E\x90\xE7\x9F\xAD\xE9\x93\xBE\xE5\xB9\xB6\xE8\xAF\xB7\xE6\xB1\x82 playurl...",
                     "\xE6\xAD\xA3\xE5\x9C\xA8\xE8\xA7\xA3\xE6\x9E\x90\xE7\x9F\xAD\xE9\x80\xA3\xE4\xB8\xA6\xE8\xAB\x8B\xE6\xB1\x82 playurl..."));
     } else if (s.video_status == 3) {
-        ImGui::TextColored(bad_col, "\xE2\x97\x8B %s",
-            s.video_error[0] ? s.video_error
-                             : i18n::t("Parse failed.",
-                                       "\xE8\xA7\xA3\xE6\x9E\x90\xE5\xA4\xB1\xE8\xB4\xA5\xE3\x80\x82",
-                                       "\xE8\xA7\xA3\xE6\x9E\x90\xE5\xA4\xB1\xE6\x95\x97\xE3\x80\x82"));
+        StatusRow(false,
+                  s.video_error[0] ? s.video_error
+                                   : i18n::t("Parse failed.",
+                                             "\xE8\xA7\xA3\xE6\x9E\x90\xE5\xA4\xB1\xE8\xB4\xA5\xE3\x80\x82",
+                                             "\xE8\xA7\xA3\xE6\x9E\x90\xE5\xA4\xB1\xE6\x95\x97\xE3\x80\x82"),
+                  ok_col, bad_col);
     } else if (s.video_status == 2) {
-        ImGui::TextColored(ok_col, "\xE2\x97\x8F %s",
-            i18n::t("Parsed successfully.",
-                    "\xE8\xA7\xA3\xE6\x9E\x90\xE6\x88\x90\xE5\x8A\x9F\xE3\x80\x82",
-                    "\xE8\xA7\xA3\xE6\x9E\x90\xE6\x88\x90\xE5\x8A\x9F\xE3\x80\x82"));
+        StatusRow(true,
+                  i18n::t("Parsed successfully.",
+                          "\xE8\xA7\xA3\xE6\x9E\x90\xE6\x88\x90\xE5\x8A\x9F\xE3\x80\x82",
+                          "\xE8\xA7\xA3\xE6\x9E\x90\xE6\x88\x90\xE5\x8A\x9F\xE3\x80\x82"),
+                  ok_col, bad_col);
         if (s.video_result_title[0]) {
             ImGui::TextColored(col::text, "%s", s.video_result_title);
         }
@@ -1243,21 +1623,14 @@ static void DrawVideoTab(State& s) {
 
     if (s.video_status == 2 && s.video_result_url[0]) {
         ImGui::Dummy(ImVec2(0, S(6.f)));
-        ImGui::SetNextItemWidth(-FLT_MIN);
         // 只读多行 —— 把直链塞进去给用户选/复制。
-        ImGuiInputTextFlags flags = ImGuiInputTextFlags_ReadOnly;
-        ImGui::InputTextMultiline("##video_url", s.video_result_url,
-                                  sizeof(s.video_result_url),
-                                  ImVec2(-FLT_MIN, S(70.f)), flags);
+        NLInputTextMultiline("##video_url", nullptr, s.video_result_url,
+                             sizeof(s.video_result_url),
+                             ImGui::GetContentRegionAvail().x - S(14.f), S(70.f),
+                             ImGuiInputTextFlags_ReadOnly);
 
         ImGui::Dummy(ImVec2(0, S(4.f)));
-        float bw = ImGui::GetContentRegionAvail().x;
-        ImGui::PushStyleColor(ImGuiCol_Button, col::accent);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-            ImVec4(col::accent.x * 1.15f, col::accent.y * 1.15f, col::accent.z * 1.15f, 1.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-            ImVec4(col::accent.x * 0.85f, col::accent.y * 0.85f, col::accent.z * 0.85f, 1.f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.07f, 0.10f, 1.f));
+        float bw = ImGui::GetContentRegionAvail().x - S(14.f);
         ImGui::PushFont(font_medium);
         const char* lbl = (s.video_copy_toast_sec > 0.f)
             ? i18n::t("Copied!",
@@ -1266,12 +1639,11 @@ static void DrawVideoTab(State& s) {
             : i18n::t("Copy URL",
                       "\xE5\xA4\x8D\xE5\x88\xB6\xE9\x93\xBE\xE6\x8E\xA5",
                       "\xE8\xA4\x87\xE8\xA3\xBD\xE9\x80\xA3\xE7\xB5\x90");
-        if (ImGui::Button(lbl, ImVec2(bw, S(32.f)))) {
+        if (NLButton(lbl, bw, S(32.f), /*accent*/true)) {
             s.video_copy_request = true;
             s.video_copy_toast_sec = 1.4f;
         }
         ImGui::PopFont();
-        ImGui::PopStyleColor(4);
 
         ImGui::PushFont(font_caption);
         ImGui::TextColored(col::text_dim, "%s",
@@ -1292,8 +1664,7 @@ static void DrawSettings(State& s) {
     ImGui::PopFont();
     static const char* lang_labels[] = { "English", "\xE7\xAE\x80\xE4\xBD\x93\xE4\xB8\xAD\xE6\x96\x87", "\xE7\xB9\x81\xE9\xAB\x94\xE4\xB8\xAD\xE6\x96\x87" };
     int li = (int)s.language;
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::Combo("##language", &li, lang_labels, IM_ARRAYSIZE(lang_labels))) {
+    if (NLCombo("##language", &li, lang_labels, IM_ARRAYSIZE(lang_labels))) {
         s.language = (i18n::Lang)li;
     }
     CardEnd();
@@ -1303,8 +1674,7 @@ static void DrawSettings(State& s) {
     ImGui::PushFont(font_body);
     ImGui::TextColored(col::text_dim, "%s", i18n::t("Host", "主机", "主機"));
     ImGui::PopFont();
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputText("##host", s.osc_host, sizeof(s.osc_host));
+    NLInputText("##host", nullptr, s.osc_host, sizeof(s.osc_host));
     NLSliderInt(i18n::t("Port", "端口", "連接埠"), &s.osc_port, 1, 65535);
     NLSliderInt(i18n::t("Rate limit (ms)", "速率限制 (毫秒)", "速率限制 (毫秒)"),
                 &s.rate_limit_ms, 500, 3000);
@@ -1323,8 +1693,7 @@ static void DrawSettings(State& s) {
     ImGui::TextColored(col::text_dim, "%s",
         i18n::t("Provider priority", "提供方优先级", "提供方優先順序"));
     ImGui::PopFont();
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::Combo("##provider", &s.lyrics_provider, providers, 3);
+    NLCombo("##provider", &s.lyrics_provider, providers, 3);
     NLToggle(i18n::t("Include translation",  "包含翻译",        "包含翻譯"),         &s.include_translation);
     NLToggle(i18n::t("Strip metadata tags",  "去除元数据标签",   "去除中繼資料標籤"), &s.strip_metadata_tags);
     CardEnd();
@@ -1335,19 +1704,16 @@ static void DrawSettings(State& s) {
     ImGui::TextColored(col::text_dim, "%s",
         i18n::t("When lyrics are available", "有歌词时", "有歌詞時"));
     ImGui::PopFont();
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextMultiline("##fmt_l", s.fmt_lyrics, sizeof(s.fmt_lyrics),
-                              ImVec2(-FLT_MIN, S(44.f)));
+    NLInputTextMultiline("##fmt_l", nullptr, s.fmt_lyrics, sizeof(s.fmt_lyrics),
+                         ImGui::GetContentRegionAvail().x, S(44.f));
     ImGui::PushFont(font_body);
     ImGui::TextColored(col::text_dim, "%s", i18n::t("When no lyrics", "无歌词时", "無歌詞時"));
     ImGui::PopFont();
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputText("##fmt_nl", s.fmt_no_lyrics, sizeof(s.fmt_no_lyrics));
+    NLInputText("##fmt_nl", nullptr, s.fmt_no_lyrics, sizeof(s.fmt_no_lyrics));
     ImGui::PushFont(font_body);
     ImGui::TextColored(col::text_dim, "%s", i18n::t("When paused", "暂停时", "暫停時"));
     ImGui::PopFont();
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputText("##fmt_p", s.fmt_paused, sizeof(s.fmt_paused));
+    NLInputText("##fmt_p", nullptr, s.fmt_paused, sizeof(s.fmt_paused));
     CardEnd();
 }
 
@@ -1383,11 +1749,14 @@ void Draw(State& s, int win_w, int win_h) {
         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
 
     Tab clicked_tab = s.current_tab;
+    g_sidebar_tab_count = 0;
     if (SidebarTab(i18n::t("Lyrics",   "歌词", "歌詞"), icons::DrawMusic,     s.current_tab == Tab::Lyrics))   clicked_tab = Tab::Lyrics;
     if (SidebarTab(i18n::t("Activity", "应用", "應用"), icons::DrawAppWindow, s.current_tab == Tab::Activity)) clicked_tab = Tab::Activity;
     if (SidebarTab(i18n::t("Audio",    "\xE9\x9F\xB3\xE9\xA2\x91", "\xE9\x9F\xB3\xE9\xA0\xBB"), icons::DrawSpeaker, s.current_tab == Tab::Audio)) clicked_tab = Tab::Audio;
     if (SidebarTab(i18n::t("Video",    "\xE8\xA7\x86\xE9\xA2\x91", "\xE5\xBD\xB1\xE7\x89\x87"), icons::DrawVideo,   s.current_tab == Tab::Video)) clicked_tab = Tab::Video;
     if (SidebarTab(i18n::t("Settings", "设置", "設定"), icons::DrawGear,      s.current_tab == Tab::Settings)) clicked_tab = Tab::Settings;
+
+    DrawSidebarIndicator((int)s.current_tab);
 
     if (clicked_tab != s.current_tab) {
         s.last_tab = s.current_tab;
@@ -1475,7 +1844,7 @@ void Draw(State& s, int win_w, int win_h) {
                    s.service_running
                      ? i18n::t("\xE2\x97\x8F Service ON",  "\xE2\x97\x8F \xE6\x9C\x8D\xE5\x8A\xA1\xE5\xBC\x80\xE5\x90\xAF", "\xE2\x97\x8F \xE6\x9C\x8D\xE5\x8B\x99\xE9\x96\x8B\xE5\x95\x9F")
                      : i18n::t("\xE2\x97\x8B Service OFF", "\xE2\x97\x8B \xE6\x9C\x8D\xE5\x8A\xA1\xE5\x85\xB3\xE9\x97\xAD", "\xE2\x97\x8B \xE6\x9C\x8D\xE5\x8B\x99\xE9\x97\x9C\xE9\x96\x89"));
-    const char* ver = "v3.1";
+    const char* ver = "v3.2-beta";
     ImVec2 vsz = ImGui::CalcTextSize(ver);
     dl_fg->AddText(ImVec2(f0.x + wsz.x - vsz.x - S(12.f), f0.y + footer_h - S(18.f)),
                    U32(col::text_dim), ver);
@@ -1492,6 +1861,10 @@ void Draw(State& s, int win_w, int win_h) {
     float t  = EaseOutCubic(s.tab_transition);
     float dx = (1.f - t) * S(24.f);
     float a  = t;
+
+    // 让 CardBegin 能看到当前帧的 tab 过渡值,做卡片 staggered slide-in。
+    g_tab_anim_t = s.tab_transition;
+    g_card_index = 0;
 
     ImGui::SetNextWindowPos(ImVec2(sb_w, top_h));
     ImGui::SetNextWindowSize(ImVec2((float)win_w - sb_w, (float)win_h - top_h));

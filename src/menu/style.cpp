@@ -154,18 +154,20 @@ static void ApplyImGuiStyleColors() {
 void ApplyTheme(Theme t) {
     using col::from_rgba;
     if (t == Theme::Light) {
-        col::bg_root      = from_rgba(244.f, 245.f, 248.f, 255.f);
-        col::bg_sidebar   = from_rgba(234.f, 236.f, 240.f, 255.f);
-        col::bg_content   = from_rgba(248.f, 249.f, 251.f, 255.f);
+        // Cool paper-white 底色,微微偏蓝。bg_input 跟 bg_root 拉开一档让输入框
+        // 看得见;bg_card 用纯白做 elevated 卡片。
+        col::bg_root      = from_rgba(249.f, 250.f, 252.f, 255.f);
+        col::bg_sidebar   = from_rgba(240.f, 243.f, 248.f, 255.f);
+        col::bg_content   = from_rgba(249.f, 250.f, 252.f, 255.f);
         col::bg_card      = from_rgba(255.f, 255.f, 255.f, 255.f);
-        col::bg_input     = from_rgba(235.f, 238.f, 242.f, 255.f);
-        col::bg_titlebar  = from_rgba(234.f, 236.f, 240.f, 255.f);
-        col::bg_hover     = from_rgba(218.f, 222.f, 230.f, 255.f);
-        col::stroke       = from_rgba(215.f, 220.f, 228.f, 255.f);
+        col::bg_input     = from_rgba(242.f, 244.f, 249.f, 255.f);
+        col::bg_titlebar  = from_rgba(240.f, 243.f, 248.f, 255.f);
+        col::bg_hover     = from_rgba(228.f, 233.f, 242.f, 255.f);
+        col::stroke       = from_rgba(212.f, 218.f, 228.f, 255.f);
 
-        col::text         = from_rgba( 26.f,  31.f,  38.f, 255.f);
-        col::text_dim     = from_rgba(106.f, 117.f, 132.f, 255.f);
-        col::text_caption = from_rgba(125.f, 134.f, 152.f, 255.f);
+        col::text         = from_rgba( 18.f,  24.f,  32.f, 255.f);
+        col::text_dim     = from_rgba( 95.f, 108.f, 124.f, 255.f);
+        col::text_caption = from_rgba(130.f, 142.f, 158.f, 255.f);
 
         col::accent       = from_rgba( 32.f, 134.f, 184.f, 255.f);
         col::accent_dim   = from_rgba(118.f, 162.f, 194.f, 255.f);
@@ -173,18 +175,19 @@ void ApplyTheme(Theme t) {
         col::dot_off      = from_rgba(150.f, 160.f, 175.f, 255.f);
         col::dot_on       = from_rgba(255.f, 255.f, 255.f, 255.f);
     } else {
-        col::bg_root      = from_rgba( 21.f,  25.f,  31.f, 255.f);
-        col::bg_sidebar   = from_rgba( 16.f,  20.f,  26.f, 255.f);
-        col::bg_content   = from_rgba( 21.f,  25.f,  31.f, 255.f);
-        col::bg_card      = from_rgba( 26.f,  31.f,  39.f, 255.f);
-        col::bg_input     = from_rgba( 13.f,  16.f,  21.f, 255.f);
-        col::bg_titlebar  = from_rgba( 16.f,  20.f,  26.f, 255.f);
-        col::bg_hover     = from_rgba( 34.f,  40.f,  50.f, 255.f);
-        col::stroke       = from_rgba( 34.f,  40.f,  50.f, 255.f);
+        // 暖中性 off-black,不是纯 #000;input 比 root 略亮一档,card 再亮一档。
+        col::bg_root      = from_rgba( 14.f,  14.f,  14.f, 255.f);
+        col::bg_sidebar   = from_rgba( 10.f,  10.f,  10.f, 255.f);
+        col::bg_content   = from_rgba( 14.f,  14.f,  14.f, 255.f);
+        col::bg_card      = from_rgba( 22.f,  22.f,  22.f, 255.f);
+        col::bg_input     = from_rgba( 18.f,  18.f,  18.f, 255.f);
+        col::bg_titlebar  = from_rgba( 10.f,  10.f,  10.f, 255.f);
+        col::bg_hover     = from_rgba( 32.f,  32.f,  32.f, 255.f);
+        col::stroke       = from_rgba( 45.f,  45.f,  45.f, 255.f);
 
-        col::text         = from_rgba(232.f, 236.f, 242.f, 255.f);
-        col::text_dim     = from_rgba(120.f, 134.f, 150.f, 255.f);
-        col::text_caption = from_rgba(140.f, 154.f, 170.f, 255.f);
+        col::text         = from_rgba(242.f, 242.f, 240.f, 255.f);
+        col::text_dim     = from_rgba(140.f, 140.f, 138.f, 255.f);
+        col::text_caption = from_rgba( 95.f,  95.f,  93.f, 255.f);
 
         col::accent       = from_rgba(121.f, 200.f, 235.f, 255.f);
         col::accent_dim   = from_rgba( 70.f, 120.f, 150.f, 255.f);

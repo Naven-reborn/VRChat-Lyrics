@@ -130,6 +130,7 @@ static const AliasEntry kAliasTable[] = {
     { L"vrc-lyrics",                "",           AppCategory::Unknown },
     { L"vrc-lyrics-3.0",            "",           AppCategory::Unknown },
     { L"vrc-lyrics-3.1",            "",           AppCategory::Unknown },
+    { L"vrc-lyrics-3.2-beta",       "",           AppCategory::Unknown },
 };
 
 static const AliasEntry* FindAlias(const std::wstring& stem) {

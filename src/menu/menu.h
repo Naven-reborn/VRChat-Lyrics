@@ -55,6 +55,9 @@ struct State {
     int         np_dur_ms     = 0;
     bool        np_has_lyrics = false;
     char        np_current_line[512] = "";
+    // 音乐源:0=Other 1=NetEase 2=Spotify 3=YTMusic,跟 playback::Source 一一对应。
+    // main.cpp 每帧推,NOW PLAYING 卡里显示成 "NetEase Cloud" / "Spotify" / ...
+    int         np_source = 0;
 
     // Album cover. main.cpp owns the ID3D11ShaderResourceView's lifetime.
     void* cover_srv = nullptr;
@@ -133,5 +136,23 @@ std::string EffectiveStatusPrefix(const State& s);
 bool NLToggle(const char* label, bool* v);
 bool NLSliderInt(const char* label, int* v, int v_min, int v_max);
 void NLDivider();
+
+// NL 风格的输入框 / 下拉 / 按钮。圆角和 card 系统一致,focus / hover 都有动画。
+// width <= 0 表示占满 ContentRegionAvail。返回值含义同 ImGui::* 同名函数。
+bool NLInputText(const char* id, const char* hint,
+                 char* buf, size_t buf_size, float width = 0.f);
+// 多行编辑框。flags 直传 ImGui(主要用 ReadOnly)。
+bool NLInputTextMultiline(const char* id, const char* hint,
+                          char* buf, size_t buf_size,
+                          float width, float height,
+                          int imgui_flags = 0);
+// 下拉。current 是当前选中索引,items 是字符串数组,count 是数组长度。
+// 返回 true 表示用户改了选项。
+bool NLCombo(const char* id, int* current, const char* const* items, int count, float width = 0.f);
+// 按钮。size.x == 0 → ContentRegionAvail.x;size.y == 0 → 默认 36px。
+// accent=true 用 accent 配色(亮蓝/亮黄),false 用 input/hover 配色。
+// danger=true 用红色配色,accent 时优先 danger。
+bool NLButton(const char* label, float width, float height,
+              bool accent, bool danger = false, bool disabled = false);
 
 }

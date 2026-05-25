@@ -5,7 +5,6 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdarg>
-#include <regex>
 #include <string>
 
 namespace bilibili {
@@ -28,10 +27,22 @@ static const char* kCommonHeaders =
     "Accept: application/json, text/plain, */*\r\n"
     "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n";
 
-// 上游 wangure0329 用了 9 个主节点 + 1 个 mirror 节点轮询,我们这里没有
-// "成功率统计" 的运行时,直接固定到深圳 GOSS —— 上游测下来三大节点都能用,
-// 这个是默认排第一的,对国内用户最稳。后面如果有失败上报需求再加权重。
-static const char* kPreferredNode = "upos-sz-estgoss.bilivideo.com";
+// v3.2:不再强制 CDN 节点替换。
+// 原因:VRChat 的可信视频域名白名单里只有 bilibili.com 网页层,
+// upos-*.bilivideo.com / akamaized.net / cloudfront.net 都不在白名单上。
+// 强制替换到任何一个 host 都不能让视频在 VRChat 里"无需 Untrusted URLs 即可播放",
+// 反而失去了 bilibili 自己根据用户位置选最近 CDN 的能力。
+// 直接用 bilibili 给的原始 baseUrl,host 多样化(各种 CDN 都有),命中
+// 用户已放行白名单的概率反而比固定一个节点高一点。
+
+// 从 baseUrl 抽 host(不含 scheme 和 path),给 UI 显示当前 CDN host 用。
+static std::string ExtractHost(const std::string& url) {
+    auto p = url.find("://");
+    if (p == std::string::npos) return {};
+    auto start = p + 3;
+    auto slash = url.find('/', start);
+    return url.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+}
 
 // 从任意字符串里抠 BV 号。BV + 后面 10 位 [a-zA-Z0-9]。
 static std::string ExtractBv(const std::string& s) {
@@ -46,15 +57,6 @@ static std::string ExtractBv(const std::string& s) {
         }
     }
     return {};
-}
-
-// 用正则把 URL 里所有 upos-{sz,bj,hz}-xxx.bilivideo.com / .akamaized.net /
-// .cloudfront.net 全换成首选节点。能跑就行,不追求极致正则。
-static std::string ReplaceCdnHost(const std::string& url, const std::string& node) {
-    static const std::regex re(
-        R"(upos-(?:sz|bj|hz)-[^/]+?\.(?:bilivideo\.com|akamaized\.net|cloudfront\.net))",
-        std::regex::ECMAScript | std::regex::icase);
-    return std::regex_replace(url, re, node);
 }
 
 // b23.tv/xxx → 完整 bilibili.com URL。利用 net::ResolveRedirect 拿 Location 头,
@@ -146,13 +148,21 @@ ParseResult Parse(const std::string& input) {
         if (cid == 0) { r.error = ErrorCode::Api; return r; }
     }
 
-    // Step 2: player/playurl → dash.video / durl
-    // qn=112 要 2K,fnval=16 = DASH,platform=html5 用来绕开 web 端的防盗链限制。
+    // Step 2: player/playurl → durl (单文件 MP4 / FLV)
+    //
+    // v3.3 起改用 fnval=1(MP4 单文件)替代 fnval=16(DASH)。
+    // 原因:DASH 给的 baseUrl 扩展名是 .m4s(fragmented MP4 segment),VRChat 的
+    // AVPro / Unity VideoPlayer 看到 .m4s 直接报"不支持的链接"。MP4 durl 拿到的
+    // URL 是 .mp4 / .flv 单文件,音视频合在一起,所有播放器都吃。代价:画质上限
+    // 1080P(qn=80),没法上 4K/HDR/8K —— 但 VRChat 视频墙根本不需要 4K。
+    //
+    // qn=80 直接要 1080P,API 会自动降到该视频实际可用的最高质量。platform=html5
+    // 仍然带上,用来绕开网页端防盗链限制(给的 URL 不需要带 Referer 也能拉)。
     {
         char url_buf[256];
         std::snprintf(url_buf, sizeof(url_buf),
             "https://api.bilibili.com/x/player/playurl?"
-            "bvid=%s&cid=%lld&qn=112&fnval=16&platform=html5",
+            "bvid=%s&cid=%lld&qn=80&fnval=1&platform=html5",
             bvid.c_str(), (long long)cid);
 
         std::string body;
@@ -173,50 +183,53 @@ ParseResult Parse(const std::string& input) {
             }
             const auto& data = j["data"];
 
-            // 优先 DASH 视频流。bilibili 给的数组是按质量从高到低排,
-            // 我们尽量挑 id==112(1440P),否则取数组第一个(自动最高可用)。
-            if (data.contains("dash") && data["dash"].is_object() &&
-                data["dash"].contains("video") && data["dash"]["video"].is_array() &&
-                !data["dash"]["video"].empty()) {
-                const auto& videos = data["dash"]["video"];
-                const nlohmann::json* picked = nullptr;
-                for (auto& v : videos) {
-                    if (v.value("id", 0) == 112) { picked = &v; break; }
-                }
-                if (!picked) picked = &videos[0];
-                if (picked->contains("baseUrl") && (*picked)["baseUrl"].is_string()) {
-                    std::string original = (*picked)["baseUrl"].get<std::string>();
-                    r.url     = ReplaceCdnHost(original, kPreferredNode);
-                    r.format  = "DASH";
-                    int qn    = picked->value("id", 0);
-                    r.quality = (qn == 120 ? "4K" : qn == 116 ? "1080P60" :
-                                 qn == 112 ? "1440P" : qn == 80  ? "1080P" :
-                                 qn == 64  ? "720P"  : qn == 32  ? "480P"  :
-                                 qn == 16  ? "360P"  : "AUTO");
-                    r.node    = kPreferredNode;
-                    r.ok      = true;
-                    DiagLog("dash picked qn=%d url=%.120s", qn, r.url.c_str());
-                    return r;
-                }
-            }
-
-            // 退化到 durl(FLV),老视频和部分番剧才有。
+            // 主路径:durl 单文件。data.quality 是实际返回的 qn(可能比请求的低)。
             if (data.contains("durl") && data["durl"].is_array() &&
                 !data["durl"].empty() &&
                 data["durl"][0].contains("url") &&
                 data["durl"][0]["url"].is_string()) {
-                std::string original = data["durl"][0]["url"].get<std::string>();
-                r.url     = ReplaceCdnHost(original, kPreferredNode);
-                r.format  = "FLV";
-                r.quality = "1440P";
-                r.node    = kPreferredNode;
+                r.url     = data["durl"][0]["url"].get<std::string>();
+                int qn    = data.value("quality", 0);
+                r.quality = (qn == 80 ? "1080P" : qn == 64 ? "720P" :
+                             qn == 32 ? "480P"  : qn == 16 ? "360P" : "AUTO");
+                // format 看 URL 后缀(去掉 query string 再判),.mp4 / .flv 都常见。
+                r.format  = "MP4";
+                {
+                    std::string p = r.url;
+                    auto qpos = p.find('?');
+                    if (qpos != std::string::npos) p.resize(qpos);
+                    if (p.size() >= 4 && p.compare(p.size()-4, 4, ".flv") == 0) r.format = "FLV";
+                }
+                r.node    = ExtractHost(r.url);
                 r.ok      = true;
-                DiagLog("durl picked url=%.120s", r.url.c_str());
+                DiagLog("durl picked qn=%d fmt=%s host=%s",
+                        qn, r.format.c_str(), r.node.c_str());
                 return r;
             }
 
+            // 兜底:个别新视频可能只给 DASH(理论上 fnval=1 不会触发这里,但 API
+            // 偶尔有边缘 case)。给出来用户能复制,只是 VRChat 大概率不认 .m4s。
+            if (data.contains("dash") && data["dash"].is_object() &&
+                data["dash"].contains("video") && data["dash"]["video"].is_array() &&
+                !data["dash"]["video"].empty()) {
+                const auto& videos = data["dash"]["video"];
+                if (videos[0].contains("baseUrl") && videos[0]["baseUrl"].is_string()) {
+                    r.url     = videos[0]["baseUrl"].get<std::string>();
+                    r.format  = "DASH";
+                    int qn    = videos[0].value("id", 0);
+                    r.quality = (qn == 120 ? "4K" : qn == 116 ? "1080P60" :
+                                 qn == 112 ? "1440P" : qn == 80  ? "1080P" :
+                                 qn == 64  ? "720P"  : qn == 32  ? "480P"  :
+                                 qn == 16  ? "360P"  : "AUTO");
+                    r.node    = ExtractHost(r.url);
+                    r.ok      = true;
+                    DiagLog("dash fallback qn=%d host=%s", qn, r.node.c_str());
+                    return r;
+                }
+            }
+
             r.error = ErrorCode::NoStream;
-            DiagLog("no dash & no durl in playurl response");
+            DiagLog("no durl & no dash in playurl response");
             return r;
         } catch (...) {
             r.error = ErrorCode::JsonInvalid;

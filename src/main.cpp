@@ -237,6 +237,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         if (auto t = smtc.Current()) {
             menu_state.np_detected = true;
             menu_state.np_playing  = (t->status == playback::Status::Playing);
+            menu_state.np_source   = (int)t->source;
             copy_safe(menu_state.np_title,  sizeof(menu_state.np_title),  t->title);
             copy_safe(menu_state.np_artist, sizeof(menu_state.np_artist), t->artist);
             copy_safe(menu_state.np_album,  sizeof(menu_state.np_album),  t->album);
@@ -244,8 +245,9 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             int64_t pos = t->EffectivePositionMs(now_ms);
-            if (t->ncm_id != monotonic_id) {
-                monotonic_id = t->ncm_id;
+            // 用 match_key 做切歌识别,跨 source 都稳。
+            if (t->match_key != monotonic_id) {
+                monotonic_id = t->match_key;
                 monotonic_pos_ms = pos;
             } else {
                 int64_t delta = pos - monotonic_pos_ms;
@@ -255,14 +257,23 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             menu_state.np_dur_ms = (int)t->duration_ms;
 
             lyrics.SetIncludeTranslation(menu_state.include_translation);
-            lyrics.RequestNcm(t->ncm_id);
+            lyrics.SetProvider((lyrics::Provider)menu_state.lyrics_provider);
+            lyrics::Query lreq;
+            lreq.match_key    = t->match_key;
+            lreq.ncm_id       = t->ncm_id;
+            lreq.title        = t->title;
+            lreq.artist       = t->artist;
+            lreq.album        = t->album;
+            lreq.duration_sec = (int)(t->duration_ms / 1000);
+            lreq.is_netease   = (t->source == playback::Source::NetEase);
+            lyrics.Request(lreq);
 
             // 切歌时:旧 SRV 留作淡出,新封面用 SMTC 缩略图字节重新解码上传。
-            if (t->ncm_id != current_cover_ncm) {
+            if (t->match_key != current_cover_ncm) {
                 if (previous_srv) { previous_srv->Release(); previous_srv = nullptr; }
                 previous_srv = current_srv;
                 current_srv  = nullptr;
-                current_cover_ncm = t->ncm_id;
+                current_cover_ncm = t->match_key;
                 if (!t->thumbnail_bytes.empty()) {
                     current_srv = util::CreateCircularTexture(
                         d3d.Device(),
@@ -276,7 +287,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             menu_state.cover_srv_prev = (void*)previous_srv;
 
             auto bundle = lyrics.Current();
-            menu_state.np_has_lyrics = (bundle && bundle->has_lyrics() && bundle->ncm_id == t->ncm_id);
+            menu_state.np_has_lyrics = (bundle && bundle->has_lyrics() && bundle->match_key == t->match_key);
             if (menu_state.np_has_lyrics) {
                 int idx = lyrics::FindCurrentLine(bundle->lines, pos);
                 if (idx >= 0) current_line = bundle->lines[idx].text;
@@ -286,7 +297,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             menu_state.np_detected = false;
             menu_state.np_has_lyrics = false;
             menu_state.np_current_line[0] = 0;
-            lyrics.RequestNcm("");
+            menu_state.np_source = 0;
+            lyrics::Query empty; lyrics.Request(empty);  // clear
         }
 
         if (visible) menu::Draw(menu_state, window.Width(), window.Height());

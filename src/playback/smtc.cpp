@@ -6,6 +6,8 @@
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/Windows.Storage.Streams.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <string>
 
@@ -27,8 +29,76 @@ static int64_t NowMs() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+static std::string ToLowerAscii(std::string s) {
+    for (auto& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+    return s;
+}
+
+static bool StringEndsWith(const std::string& s, const char* suffix) {
+    size_t n = std::strlen(suffix);
+    return s.size() >= n && std::memcmp(s.data() + s.size() - n, suffix, n) == 0;
+}
+
+static bool StringContains(const std::string& s, const char* needle) {
+    return s.find(needle) != std::string::npos;
+}
+
+// 根据 SourceAppUserModelId + Title 判断音乐源。识别策略:
+//   - inflink-rs 插件写 Genres "NCM-..." → NetEase(在外层先匹配掉)
+//   - SourceAppUserModelId 包含 "Spotify" → Spotify
+//   - SourceAppUserModelId 包含 "YouTubeMusic"(YTMD 桌面端) → YTMusic
+//   - 浏览器(chrome/edge/firefox/opera/brave) + 标题尾部 " - YouTube Music" → YTMusic
+//   - 其它一律 Other(查不到歌词,但仍发"播放中"信息)
+static Source ClassifySource(const std::string& aumid_in, const std::string& title) {
+    std::string aumid = ToLowerAscii(aumid_in);
+
+    if (StringContains(aumid, "spotify")) return Source::Spotify;
+    if (StringContains(aumid, "youtubemusic") ||
+        StringContains(aumid, "ytmdesktop")    ||
+        StringContains(aumid, "ytmusic")) {
+        return Source::YTMusic;
+    }
+    bool is_browser =
+        StringContains(aumid, "chrome")  || StringContains(aumid, "msedge") ||
+        StringContains(aumid, "firefox") || StringContains(aumid, "opera")  ||
+        StringContains(aumid, "brave")   || StringContains(aumid, "vivaldi");
+    if (is_browser && StringEndsWith(title, " - YouTube Music")) {
+        return Source::YTMusic;
+    }
+    return Source::Other;
+}
+
+// 在 title 末尾去掉 " - YouTube Music" 之类的源后缀,让歌词查询走干净的歌名。
+static std::string CleanTitleForSource(const std::string& title, Source src) {
+    if (src != Source::YTMusic) return title;
+    static const char* kSuffixes[] = { " - YouTube Music", " · YouTube Music" };
+    for (const char* s : kSuffixes) {
+        size_t n = std::strlen(s);
+        if (title.size() > n && std::memcmp(title.data() + title.size() - n, s, n) == 0) {
+            return title.substr(0, title.size() - n);
+        }
+    }
+    return title;
+}
+
+static std::string BuildMatchKey(const Track& t) {
+    if (t.source == Source::NetEase && !t.ncm_id.empty()) {
+        return "ncm:" + t.ncm_id;
+    }
+    if (t.title.empty() && t.artist.empty()) return {};
+    std::string key = "meta:";
+    key += t.title;     key += '|';
+    key += t.artist;    key += '|';
+    key += t.album;     key += '|';
+    int dur = (int)(t.duration_ms / 1000);
+    char buf[16]; std::snprintf(buf, sizeof(buf), "%d", dur);
+    key += buf;
+    return key;
+}
+
 // 选 session 的策略:优先挑 Genres 里带 NCM- 前缀的(那就是网易云,inflink-rs
-// 插件会写进去);找不到就用系统当前 session 兜底。
+// 插件会写进去);找不到就用系统当前 session 兜底,然后看 source_app 字段判断
+// 是 Spotify / YouTube Music / 还是其它。
 static winrt_ns::GlobalSystemMediaTransportControlsSession PickSession(
     winrt_ns::GlobalSystemMediaTransportControlsSessionManager const& mgr,
     std::string& out_ncm_id) {
@@ -139,6 +209,15 @@ void SmtcWatcher::ThreadProc() {
                         tl.EndTime()).count();
                 }
                 track->position_sampled_at_ms = NowMs();
+
+                // 分类源 & 清理标题。NCM 始终是 NetEase,其它根据 aumid + title 判。
+                if (!track->ncm_id.empty()) {
+                    track->source = Source::NetEase;
+                } else {
+                    track->source = ClassifySource(track->source_app, track->title);
+                    track->title  = CleanTitleForSource(track->title, track->source);
+                }
+                track->match_key = BuildMatchKey(*track);
 
                 m_current.store(track);
             } else {

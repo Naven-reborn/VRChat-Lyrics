@@ -40,7 +40,7 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)out\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)out\$(Configuration)\obj\</IntDir>
-    <TargetName>vrc-lyrics-3.1</TargetName>
+    <TargetName>vrc-lyrics-3.2-beta</TargetName>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
@@ -101,6 +101,7 @@
     <ClCompile Include="src\net\winhttp_client.cpp" />
     <ClCompile Include="src\lyrics\lrc_parser.cpp" />
     <ClCompile Include="src\lyrics\netease.cpp" />
+    <ClCompile Include="src\lyrics\lrclib.cpp" />
     <ClCompile Include="src\lyrics\lyrics_service.cpp" />
     <ClCompile Include="src\util\image.cpp" />
     <ClCompile Include="src\util\foreground.cpp" />
@@ -141,6 +142,7 @@
     <ClInclude Include="src\net\winhttp_client.h" />
     <ClInclude Include="src\lyrics\lrc_parser.h" />
     <ClInclude Include="src\lyrics\netease.h" />
+    <ClInclude Include="src\lyrics\lrclib.h" />
     <ClInclude Include="src\lyrics\lyrics_service.h" />
     <ClInclude Include="src\util\image.h" />
     <ClInclude Include="src\util\foreground.h" />
