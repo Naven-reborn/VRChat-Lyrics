@@ -6,6 +6,7 @@
 **v2.0:网易云音频 → VRChat 麦克风(进程级 loopback + VB-Cable)**
 **v3.0:Bilibili 视频解析直链 + 音频中继音质修复**
 **v3.1:Activity 标签升级为状态中心(自定义状态 / AFK / 分类前缀) + 完整 emoji 支持**
+**v3.2-beta:多源歌词(Spotify / YouTube Music via LRCLib)+ Bilibili 输出 MP4 单文件(解决 VRChat "不支持的链接")+ UI 大改(自定义控件 / 滑动 sidebar 指示 / 卡片 staggered 动画)**
 
 C++ + ImGui · 中英繁三语 · 暗亮主题
 
@@ -19,10 +20,10 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
 
 ## ✨ 特性
 
-- 🎵 **自动读取网易云正在播放的歌**
-  通过 BetterNCM 插件 [inflink-rs](https://github.com/apoint123/inflink-rs) 把网易云写到 Windows SMTC,我们再从 SMTC 拉播放状态(歌名/艺人/专辑/进度/封面/网易云歌曲 ID)。
-- 📝 **同步歌词**
-  直连网易云公开 API,带翻译可选合并,LRCLib 作 fallback。
+- 🎵 **自动读取网易云 / Spotify / YouTube Music 正在播放的歌(v3.2-beta 起多源)**
+  网易云走 BetterNCM 插件 [inflink-rs](https://github.com/apoint123/inflink-rs) 写 SMTC genre 拿到歌曲 ID;Spotify / YouTube Music 通过 SMTC SourceAppUserModelId + 标题尾缀识别(Chrome / Edge / Firefox 等浏览器里的 YouTube Music 也认),没有 ID 时走 title + artist + album + duration 模糊匹配。
+- 📝 **同步歌词(v3.2-beta:LRCLib 改成真正可用的 fallback)**
+  网易云直连 music.163.com 公开 API(支持翻译合并);非网易云源走 LRCLib(`api/get` 精确匹配 + `api/search` 兜底)。Settings 里 Provider Priority 三档:仅网易云 / 网易云→LRCLib / 仅 LRCLib。
 - 🎤 **OSC 实时推送 VRChat chatbox**
   支持自定义模板,有速率限制不会触发 chatbox 风控。
 - 🔊 **音频中继到 VRChat 麦克风(v2.0 新增)**
@@ -31,14 +32,22 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
   程序内点 "下载并安装" → 自动下载官方驱动包 → 解压 → 拉起 UAC 安装器 → 自动验证,无需手动折腾。
 - 🎚 **增益 + 硬限幅器(v2.0 新增 / v3.0 升级)**
   防爆音兜底,线性区完全透传,只在快爆音时介入。v3.0 把硬切换成 15% knee + tanh 渐进,消除给 Opus "添乱" 的奇次谐波。带实时峰值表。
-- 🎬 **Bilibili 视频解析 → VRChat 视频播放器(v3.0 新增)**
-  贴 BV 号 / 完整 bilibili 链接 / b23.tv 短链,一键解析出能直接丢进 VRChat 视频播放器的 1440P (2K) 直链。本地 WinHTTP 直连官方 API,不走第三方中转。
+- 🎬 **Bilibili 视频解析 → VRChat 视频播放器(v3.0 新增 / v3.2-beta 切到 MP4)**
+  贴 BV 号 / 完整 bilibili 链接 / b23.tv 短链,一键解析出能直接丢进 VRChat 视频播放器的直链。v3.2-beta 起从 DASH(`fnval=16`)切到 MP4 单文件(`fnval=1`),URL 后缀 `.mp4` —— 所有 VRChat 视频播放器(AVPro / Unity VideoPlayer / ProTV / USharpVideo / Yamabushi)都能识别,**彻底解决 v3.1 报 "不支持的链接" 的问题**。代价:画质上限 1080P,但视频墙够用了。
 - 🎮 **附加当前前台应用**
   打游戏时自动加上"🎮 VRChat · 🎵 ...",别人能看到你在干啥。v3.1 起按 **应用分类**(游戏/浏览器/聊天/IDE/音乐/办公/创作)用不同 emoji,每类 4 个候选可在 UI 里改。
 - 🪪 **状态中心(v3.1 新增)**
   Activity 标签升级。自定义状态(🚶 BRB / 💤 睡觉 / 💼 工作中 / 🎬 直播中 一键预设,或自由输入文本,可选 5/30/60 分钟自动清除)、AFK 自动检测(键鼠不动超过阈值就在 chatbox 显示 💤 AFK)、分类 emoji 自定义(带滑动 pill + squash-stretch + halo 动画)。三层优先级:**自定义 > AFK > 前台应用**。
 - 🎭 **完整 emoji 字形(v3.1 修复)**
   之前 emoji 在某些环境会渲染成 `?`,v3.1 起 ImGui 编译时打开 `IMGUI_USE_WCHAR32`,运行时合并 Windows 自带的 `seguiemj.ttf`,补充平面所有常用 emoji 块都能正确显示(单色 outline,无彩色)。
+- 🎨 **UI 整体重做(v3.2-beta)**
+  - 全套自定义 `NLInputText` / `NLInputTextMultiline` / `NLCombo` / `NLButton` 控件,统一 padding / 圆角 / focus 反馈
+  - Focus 状态从底部 underline 改为沿输入框圆角的 accent border,跟控件本身轮廓贴合
+  - Sidebar 当前 tab 用一根滑动 accent 指示条(切 tab 时滑过去,而不是每个 tab 自己 fade in)
+  - 卡片首次出现做 staggered 横向滑入(每张卡 70ms 错开)
+  - 状态点(网易云检测 / VB-Cable 已装 / 中继运行中 / 解析成功)从静态 ●○ 改为带呼吸 pulse 的实心点 + halo
+  - 安装进度条做低通滤波,离散步骤(下载→解压→验证)看起来变成连续推进
+  - Light 主题调色板重做,输入框背景跟卡片背景拉开一档,不再"看不见"
 - 💿 **旋转专辑封面**
   CD 风格,播放时转、暂停停、切歌带淡入淡出动画。
 - 🌗 **暗色 / 亮色主题一键切**
@@ -87,16 +96,17 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
 6. **(v3.0 强烈推荐)** VRChat → Settings → Audio & Voice → **Voice Processing 改成 None** —— VRChat 默认对麦克风做降噪,会把音乐高频削掉,音质听起来"闷"。关掉这个之后音质会有质的提升
 7. 房间里其他人能直接听到你在听的歌了 🎉
 
-### (可选)Bilibili 视频解析(v3.0 新增)
+### (可选)Bilibili 视频解析(v3.0 新增 / v3.2-beta 切到 MP4)
 
 1. 切到 **视频** 标签页
 2. 在输入框里粘贴下面任意一种格式:
    - 裸 BV 号:`BV1xx411c7mu`
    - 完整链接:`https://www.bilibili.com/video/BV1xx411c7mu`
    - b23.tv 短链:`https://b23.tv/abcdef`
-3. 点 **解析**,几百毫秒后下面卡片显示视频标题 + 1440P 直链
+3. 点 **解析**,几百毫秒后下面卡片显示视频标题 + 1080P 直链(`.mp4` 后缀)
 4. 点 **复制链接**,丢进 VRChat 房间里的视频播放器 URL 输入框
 5. 解析出来的链接是带签名的 CDN 直链,**有效期 ~2 小时**,过期需重新解析
+6. **VRChat 端需要开 Settings → Video → Allow Untrusted URLs**(因为 `bilivideo.com` 不在 VRChat 默认信任列表里;v3.2-beta 起切到 MP4 后,链接本身扩展名是 `.mp4`,所有视频 player 都能识别,但 host 仍然不可信)
 
 ## 🔧 自己编译
 
@@ -214,13 +224,13 @@ src/
 │   ├── MuseoSans700.h          # ⚠ 商业字体,公开发行请替换
 │   └── MuseoSans900.h
 ├── playback/                   # SMTC 读取
-│   ├── smtc.{h,cpp}            # C++/WinRT
-│   └── track.h
+│   ├── smtc.{h,cpp}            # C++/WinRT(v3.2-beta: 加 Spotify / YouTube Music 识别)
+│   └── track.h                 # (v3.2-beta: 加 Source 枚举 + match_key)
 ├── lyrics/                     # 歌词
 │   ├── netease.{h,cpp}         # music.163.com HTTPS GET
-│   ├── lrclib.{h,cpp}          # fallback
+│   ├── lrclib.{h,cpp}          # (v3.2-beta) LRCLib 客户端,api/get + api/search fallback
 │   ├── lrc_parser.{h,cpp}      # [mm:ss.xx] 解析
-│   └── lyrics_service.{h,cpp}  # worker 线程 + 去重
+│   └── lyrics_service.{h,cpp}  # worker 线程 + 多 provider 调度(v3.2-beta)
 ├── osc/                        # VRChat OSC
 │   ├── osc_message.{h,cpp}     # OSC 1.0 编码
 │   └── chatbox.{h,cpp}         # UDP + rate limit + 去重
@@ -233,8 +243,8 @@ src/
 │   ├── wasapi_render.{h,cpp}   # shared mode + AUTOCONVERTPCM 渲染
 │   ├── relay.{h,cpp}           # 工作线程编排 + 状态发布(v3.0: 修队列错位 bug)
 │   └── vbcable_installer.{h,cpp}# 自动下载/解压/拉起 VB-Cable 安装器
-├── bilibili/                   # Bilibili 视频解析(v3.0 新增)
-│   └── parser.{h,cpp}          # BV/URL/b23.tv → web-interface/view → playurl → CDN 直链
+├── bilibili/                   # Bilibili 视频解析(v3.0 新增 / v3.2-beta MP4 切换)
+│   └── parser.{h,cpp}          # BV/URL/b23.tv → web-interface/view → playurl(fnval=1 MP4) → CDN 直链
 ├── net/winhttp_client.{h,cpp}  # WinHTTP 同步 GET + 不跟随重定向版(v3.0 加,b23.tv 用)
 ├── util/
 │   ├── image.{h,cpp}           # WIC 解码 + 圆形 alpha 蒙版 + D3D11 上传
@@ -291,13 +301,16 @@ deps/
 - **部分 VIP / 试听受限歌曲**网易云不返回歌词,会显示"暂无歌词"。
 - **MuseoSans 是商业字体**,本仓库附带的 TTF 字节数组仅供个人构建测试使用,**公开发布前请替换为开源字体**(如 Inter / Manrope,用 `binary_to_compressed_c.cpp` 转 .h)。
 - 切歌瞬间偶尔会有 200ms 左右的歌词空窗(等 HTTP 请求返回),正常现象。
-- 没装 inflink-rs 的话,SMTC 拿不到 NCM-ID,歌词模块拿不到 ID 就不工作。
+- 没装 inflink-rs 的话,SMTC 拿不到 NCM-ID,网易云歌词模块拿不到 ID 就只能走 LRCLib 模糊匹配(v3.2-beta);其它源(Spotify / YouTube Music)本来就没 ID,全部走 LRCLib。
+- **Spotify / YouTube Music 歌词命中率不及网易云** —— LRCLib 数据库英文 / 日文歌全,中文歌覆盖率明显低于网易云;原因不是程序问题,是 LRCLib 库本身。
+- **YouTube Music 在浏览器里需要标题保留 ` - YouTube Music` 后缀**(Chrome / Edge / Firefox 等都默认有,Brave 有时被插件改掉就识别不到)。
 - **音频中继**仅在 **私人/朋友房间** 使用 — 公共房间外放音乐通常被视为骚扰,可能被举报封号。
 - **音频中继需 Windows 10 build 20348+ / Windows 11**(进程级 loopback API 要求)。
 - VB-Cable 首次安装后,**个别 Win11 24H2 机器可能需要重启** 才能识别新设备。
 - 整条音频链路最终经过 VRChat 的 Opus 编码,会引入有损压缩,**听众端音质会比本地播放差一些**,属正常现象。**v3.0 起在 Audio 标签里给了一张"音质建议"卡片** —— 关掉 VRChat 的 Voice Processing 能挽回大半高频损失。
 - 升级 v1.0 → v2.0 / v3.0 时,旧 `config.json` 没有新字段,会走新默认值。v3.0 还把音频默认增益从 -6 dB 改成 -3 dB。
-- **Bilibili 视频解析(v3.0)** 拿到的是带签名的 CDN 直链,**有效期 ~2 小时**,过期得重解析;部分需要登录/大会员才能看 1440P 的视频,会自动回落到可用的最高质量;番剧(`ss12345`)只能播部分免费片段。
+- **Bilibili 视频解析(v3.0 / v3.2-beta)** 拿到的是带签名的 CDN 直链,**有效期 ~2 小时**,过期得重解析;部分需要登录/大会员才能看 1080P 的视频,会自动回落到可用的最高质量;番剧(`ss12345` / `ep12345`)目前不支持(走 PGC 接口,跟 BV 不是同一套 API);**`bilivideo.com` 不在 VRChat 默认信任域名里,听众端需各自开 Allow Untrusted URLs 才能播**(这是 VRChat 客户端设定,程序绕不了)。
+- **v3.2-beta 是 pre-release**,Spotify / YouTube Music 多源、Bilibili 切 MP4、UI 大改都是首次发布,可能有未知 bug。如果旧版工作正常你也可以继续用 v3.1。
 
 ## 🙏 鸣谢
 
