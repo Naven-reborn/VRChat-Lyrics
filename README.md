@@ -2,337 +2,208 @@
 
 # VRChat Lyrics
 
-**网易云歌词 → VRChat chatbox 实时推送**
-**v2.0:网易云音频 → VRChat 麦克风(进程级 loopback + VB-Cable)**
-**v3.0:Bilibili 视频解析直链 + 音频中继音质修复**
-**v3.1:Activity 标签升级为状态中心(自定义状态 / AFK / 分类前缀) + 完整 emoji 支持**
-**v3.2-beta:多源歌词(Spotify / YouTube Music via LRCLib)+ Bilibili 输出 MP4 单文件(解决 VRChat "不支持的链接")+ UI 大改(自定义控件 / 滑动 sidebar 指示 / 卡片 staggered 动画)**
-**v3.3:SMTC 进度外推修复(Spotify/YTMusic/浏览器歌词与进度丝滑)+ YouTube Music 网页端粘滞外推 + Bilibili 多P分集(`?p=N`)+ 惯性滚动 / 亮色主题 / 托盘开关 / 应用图标**
+**把正在听的歌推到 VRChat chatbox · 可选音频中继 · Bilibili 视频直链**
 
-C++ + ImGui · 中英繁三语 · 暗亮主题
+C++ + ImGui · Windows 10/11 · 中 / 英 / 繁 · 暗亮主题
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg)]()
 [![Language](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)]()
+[![Release](https://img.shields.io/badge/Release-v3.3-brightgreen.svg)](../../releases/tag/v3.3)
 
 </div>
 
 ---
 
-## ✨ 特性
+## ✨ 能做什么
 
-- 🎵 **自动读取网易云 / Spotify / YouTube Music 正在播放的歌(v3.2-beta 起多源)**
-  网易云走 BetterNCM 插件 [inflink-rs](https://github.com/apoint123/inflink-rs) 写 SMTC genre 拿到歌曲 ID;Spotify / YouTube Music 通过 SMTC SourceAppUserModelId + 标题尾缀识别(Chrome / Edge / Firefox 等浏览器里的 YouTube Music 也认),没有 ID 时走 title + artist + album + duration 模糊匹配。
-- 📝 **同步歌词(v3.2-beta:LRCLib 改成真正可用的 fallback)**
-  网易云直连 music.163.com 公开 API(支持翻译合并);非网易云源走 LRCLib(`api/get` 精确匹配 + `api/search` 兜底)。Settings 里 Provider Priority 三档:仅网易云 / 网易云→LRCLib / 仅 LRCLib。
-- 🎤 **OSC 实时推送 VRChat chatbox**
-  支持自定义模板,有速率限制不会触发 chatbox 风控。
-- 🔊 **音频中继到 VRChat 麦克风(v2.0 新增)**
-  WASAPI 进程级 loopback 只抓网易云的音频,不会把 VRChat / Discord / 系统声音一起送出去。通过 VB-Cable 虚拟声卡接入 VRChat 麦克风,房间里其他人能直接听到你的音乐。
-- 📦 **一键自动下载安装 VB-Cable(v2.0 新增)**
-  程序内点 "下载并安装" → 自动下载官方驱动包 → 解压 → 拉起 UAC 安装器 → 自动验证,无需手动折腾。
-- 🎚 **增益 + 硬限幅器(v2.0 新增 / v3.0 升级)**
-  防爆音兜底,线性区完全透传,只在快爆音时介入。v3.0 把硬切换成 15% knee + tanh 渐进,消除给 Opus "添乱" 的奇次谐波。带实时峰值表。
-- 🎬 **Bilibili 视频解析 → VRChat 视频播放器(v3.0 新增 / v3.2-beta 切到 MP4 / v3.3 多P)**
-  贴 BV 号 / 完整 bilibili 链接 / b23.tv 短链,一键解析出能直接丢进 VRChat 视频播放器的直链。v3.2-beta 起从 DASH(`fnval=16`)切到 MP4 单文件(`fnval=1`),URL 后缀 `.mp4` —— 所有 VRChat 视频播放器(AVPro / Unity VideoPlayer / ProTV / USharpVideo / Yamabushi)都能识别,**彻底解决 v3.1 报 "不支持的链接" 的问题**。代价:画质上限 1080P,但视频墙够用了。**v3.3 起识别 URL 里的 `?p=N` / `page=N`(短链重定向后的 p 也会带上),按 `data.pages[]` 取对应分P 的 cid,不再永远解析成第 1 集。**
-- ⏱ **播放进度外推(v3.3 修复)**
-  SMTC 的 `Position` 在 Spotify / YouTube Music / 浏览器里经常几秒才跳一次。v3.3 起用 `LastUpdatedTime` 做外推锚点 + 单调钳位;对 **YouTube Music 网页端** 额外做粘滞外推(浏览器时间线卡死时本地继续走表),避免歌词冻在十几秒前。
-- 🖱 **内容区惯性滚动(v3.3)**
-  滚轮带速度衰减与平滑跟随,不再生硬跳页。
-- 🔔 **关闭行为可选(v3.3)**
-  Settings 里可开关「关闭时最小化到托盘」;关掉则点 X 真正退出。
-- 🎮 **附加当前前台应用**
-  打游戏时自动加上"🎮 VRChat · 🎵 ...",别人能看到你在干啥。v3.1 起按 **应用分类**(游戏/浏览器/聊天/IDE/音乐/办公/创作)用不同 emoji,每类 4 个候选可在 UI 里改。
-- 🪪 **状态中心(v3.1 新增)**
-  Activity 标签升级。自定义状态(🚶 BRB / 💤 睡觉 / 💼 工作中 / 🎬 直播中 一键预设,或自由输入文本,可选 5/30/60 分钟自动清除)、AFK 自动检测(键鼠不动超过阈值就在 chatbox 显示 💤 AFK)、分类 emoji 自定义(带滑动 pill + squash-stretch + halo 动画)。三层优先级:**自定义 > AFK > 前台应用**。
-- 🎭 **完整 emoji 字形(v3.1 修复)**
-  之前 emoji 在某些环境会渲染成 `?`,v3.1 起 ImGui 编译时打开 `IMGUI_USE_WCHAR32`,运行时合并 Windows 自带的 `seguiemj.ttf`,补充平面所有常用 emoji 块都能正确显示(单色 outline,无彩色)。
-- 🎨 **UI 整体重做(v3.2-beta)**
-  - 全套自定义 `NLInputText` / `NLInputTextMultiline` / `NLCombo` / `NLButton` 控件,统一 padding / 圆角 / focus 反馈
-  - Focus 状态从底部 underline 改为沿输入框圆角的 accent border,跟控件本身轮廓贴合
-  - Sidebar 当前 tab 用一根滑动 accent 指示条(切 tab 时滑过去,而不是每个 tab 自己 fade in)
-  - 卡片首次出现做 staggered 横向滑入(每张卡 70ms 错开)
-  - 状态点(网易云检测 / VB-Cable 已装 / 中继运行中 / 解析成功)从静态 ●○ 改为带呼吸 pulse 的实心点 + halo
-  - 安装进度条做低通滤波,离散步骤(下载→解压→验证)看起来变成连续推进
-  - Light 主题调色板重做,输入框背景跟卡片背景拉开一档,不再"看不见"
-- 💿 **旋转专辑封面**
-  CD 风格,播放时转、暂停停、切歌带淡入淡出动画。
-- 🌗 **暗色 / 亮色主题一键切**
-  300ms 平滑过渡,不闪眼。
-- 🌐 **三语界面**:简体中文 / 繁體中文 / English,实时切换。
-- 🔔 **系统托盘**,关窗后服务在后台继续跑。
-- 💾 **设置持久化**到 `%APPDATA%\vrc-lyrics\config.json`。
-- 🖱 **无边框 + DWM 阴影**
+| | 功能 | 说明 |
+|---|---|---|
+| 🎵 | **多源 Now Playing** | 网易云 / Spotify / YouTube Music（含浏览器网页端） |
+| 📝 | **同步歌词** | 网易云直链 + LRCLib 兜底；暂停时也能保留当前歌词 |
+| 🎤 | **VRChat chatbox** | OSC 推送，可限速，相同文案 keep-alive 防气泡消失 |
+| 🧩 | **格式构建器** | 勾选字段、调顺序、单行/两行布局，不用手敲模板 |
+| 🔊 | **音频中继** | 只抓网易云 → VB-Cable → VRChat 麦克风 |
+| 🎬 | **Bilibili 解析** | BV / 链接 / b23 短链 → `.mp4` 直链；支持 `?p=N` 多 P |
+| 🪪 | **状态中心** | 自定义状态 · AFK · 前台应用分类 emoji |
+| 🖥 | **系统托盘** | 可关「关闭时最小化到托盘」 |
+
+当前版本：**v3.3**
+
+---
 
 ## 📸 截图
 
-> 上方 chatbox 是 VRChat 里别人能看到的实时歌词,下方是本程序界面。
+> 上方是 VRChat 里别人能看到的 chatbox，下方是本程序界面。
 
 <div align="center">
-  <img src="assets/screenshot-lyrics.png" width="80%" alt="歌词标签 — 正在播放卡片 + chatbox 实时推送" />
+  <img src="assets/screenshot-lyrics.png" width="80%" alt="歌词页" />
   <br><br>
-  <img src="assets/screenshot-activity.png" width="80%" alt="应用标签 — 自动识别前台应用,附加到 chatbox" />
+  <img src="assets/screenshot-activity.png" width="80%" alt="应用 / 状态中心" />
   <br><br>
-  <img src="assets/screenshot-audio.png" width="80%" alt="音频标签 — 进程级 loopback 抓网易云,通过 VB-Cable 送进 VRChat 麦克风(实机:左上角 chatbox 歌词 + 右下角中继 UI)" />
+  <img src="assets/screenshot-audio.png" width="80%" alt="音频中继" />
 </div>
+
+---
 
 ## 🚀 快速开始
 
-### 前置条件
+### 前置
 
-1. **Windows 10/11**
-2. **网易云音乐 + BetterNCM** ([安装教程](https://github.com/std-microblock/BetterNCM-Installer))
-3. **inflink-rs 插件**(从 BetterNCM 插件商店搜索安装,或 [手动下载](https://github.com/apoint123/inflink-rs/releases))
-4. **VRChat 启用 OSC**:Action Menu → Options → OSC → Enabled
+1. **Windows 10 / 11**
+2. **网易云 + BetterNCM**（[安装教程](https://github.com/std-microblock/BetterNCM-Installer)）
+3. **inflink-rs**（BetterNCM 插件商店，或 [Releases](https://github.com/apoint123/inflink-rs/releases)）—— 没有它就拿不到 NCM-ID，网易云也会走 LRCLib 模糊匹配
+4. **VRChat 打开 OSC**：Action Menu → Options → OSC → Enabled
 
 ### 跑起来
 
-1. 从 [Releases](../../releases) 下载 `vrc-lyrics-3.3.exe`(或自己编译,见下)
-2. 启动网易云,随便播一首歌
-3. 双击 `vrc-lyrics-3.3.exe`,Home 应该立刻显示曲目信息和封面
-4. 点 **Start**,VRChat chatbox 出现 "▶️ 歌名 - 艺人\n🎤 当前歌词"
-5. 点关闭按钮藏到托盘,服务继续后台运行;托盘右键 Exit 才真退出
+1. 从 [Releases](../../releases) 下载 [`vrc-lyrics-3.3.exe`](../../releases/tag/v3.3)
+2. 打开网易云（或 Spotify / YouTube Music）随便播一首
+3. 双击 exe，确认曲目和封面已识别
+4. 点 **Start**，chatbox 出现 `▶ 歌名 - 艺人` 和当前歌词
+5. 点窗口 X：默认藏到托盘继续跑；托盘右键 **Exit** 才真正退出  
+   （设置里可关掉「关闭时最小化到托盘」）
 
-### (可选)启用音频中继,让朋友听到你的音乐
+### 可选：音频中继（朋友能听见你的歌）
 
-1. 切到 **音频** 标签页
-2. 如果没装过 VB-Cable,点 **"下载并安装"** → UAC 同意 → 等自动检测完成(个别 Win11 24H2 可能要求重启)
-3. **输出设备** 自动推荐 `CABLE Input`
-4. 点 **"启动中继"**(默认 -3 dB 增益 + 软限幅,给 VRChat 编码留 headroom)
-5. VRChat → Settings → 麦克风改成 **`CABLE Output`**
-6. **(v3.0 强烈推荐)** VRChat → Settings → Audio & Voice → **Voice Processing 改成 None** —— VRChat 默认对麦克风做降噪,会把音乐高频削掉,音质听起来"闷"。关掉这个之后音质会有质的提升
-7. 房间里其他人能直接听到你在听的歌了 🎉
+1. **音频** 页 → 未装 VB-Cable 时点 **下载并安装**
+2. 输出设备选 **CABLE Input** → **启动中继**
+3. VRChat 麦克风改成 **CABLE Output**
+4. **强烈建议**：VRChat → Settings → Audio & Voice → **Voice Processing = None**（默认降噪会把音乐高频削闷）
+5. 请只在**私人 / 朋友房间**使用，公共房外放容易被举报
 
-### (可选)Bilibili 视频解析(v3.0 新增 / v3.2-beta 切到 MP4)
+### 可选：Bilibili → 视频墙
 
-1. 切到 **视频** 标签页
-2. 在输入框里粘贴下面任意一种格式:
-   - 裸 BV 号:`BV1xx411c7mu`
-   - 完整链接:`https://www.bilibili.com/video/BV1xx411c7mu`
-   - b23.tv 短链:`https://b23.tv/abcdef`
-3. 点 **解析**,几百毫秒后下面卡片显示视频标题 + 1080P 直链(`.mp4` 后缀)
-4. 点 **复制链接**,丢进 VRChat 房间里的视频播放器 URL 输入框
-5. 解析出来的链接是带签名的 CDN 直链,**有效期 ~2 小时**,过期需重新解析
-6. **VRChat 端需要开 Settings → Video → Allow Untrusted URLs**(因为 `bilivideo.com` 不在 VRChat 默认信任列表里;v3.2-beta 起切到 MP4 后,链接本身扩展名是 `.mp4`,所有视频 player 都能识别,但 host 仍然不可信)
+1. **视频** 页粘贴 BV / 完整链接 / `b23.tv` 短链（多 P 带 `?p=6` 会解析对应分集）
+2. **解析** → **复制链接** → 贴进房间视频播放器
+3. 直链约 **2 小时**有效；VRChat 需开启 **Allow Untrusted URLs**
+
+---
+
+## 🆕 v3.3 更新摘要
+
+- **进度 / 歌词**：SMTC 外推 + 单调钳位；YouTube Music **网页端粘滞外推**，避免卡在十几秒前
+- **Bilibili**：`?p=N` / `page=N` 正确解析多 P
+- **Chatbox**：keep-alive；暂停仍可保留歌词；格式改为可视化构建器
+- **UI**：亮色主题层次、惯性滚动、端口输入框、下拉动画、分类 emoji 对齐、VL 应用图标、Win11 圆角
+- **稳定性**：关闭窗口不再未响应
+
+完整下载与说明见 [Release v3.3](../../releases/tag/v3.3)。
+
+---
 
 ## 🔧 自己编译
 
-### 环境
-
-- Visual Studio Build Tools 2022(带 MSVC v143 + Windows SDK 10.0.22621 或更新)
-- 不需要 CMake,直接用 `.vcxproj` + MSBuild
-
-### 步骤
+**环境**：Visual Studio 2022 Build Tools（MSVC v143 + Windows 10 SDK）
 
 ```powershell
-# 1. 克隆本仓库
 git clone https://github.com/Naven-reborn/VRChat-Lyrics.git
 cd VRChat-Lyrics
 
-# 2. 克隆 ImGui (docking 分支) 到 deps/imgui
 git clone --branch docking --depth 1 https://github.com/ocornut/imgui.git deps/imgui
 
-# 3. 编译
 build.bat Release
-# 或 Debug:
-build.bat Debug
 ```
 
-产物在 `out\Release\vrc-lyrics-3.3.exe`。
+产物：`out\Release\vrc-lyrics-3.3.exe`  
+也可打开 `vrc-lyrics.sln` 用 VS 调试。
 
-也可以直接 VS 打开 `vrc-lyrics.sln` F5 调试。
+---
 
-## 🧠 它怎么工作
+## 🧠 工作原理（简图）
 
-**歌词链路**
-
-```
-┌─────────────────┐                                ┌──────────────────┐
-│  网易云音乐      │ ──── inflink-rs 插件 ──→        │  Windows SMTC    │
-└─────────────────┘                                └────────┬─────────┘
-                                                            │  C++/WinRT 200ms 轮询
-                                                            ↓
-                                              ┌──────────────────────────┐
-                                              │   playback::SmtcWatcher  │  歌名/艺人/进度/NCM-ID/封面字节
-                                              └────────────┬─────────────┘
-                                                           │ 切歌
-                                       ┌───────────────────┴───────────────────┐
-                                       ↓                                       ↓
-                          ┌────────────────────────┐              ┌──────────────────────┐
-                          │ lyrics::Service worker │              │  util::CreateCircular│
-                          │ WinHTTP + nlohmann     │              │  Texture (WIC + D3D) │
-                          │ music.163.com/api/...  │              └──────────┬───────────┘
-                          └────────────┬───────────┘                         │
-                                       ↓                                    ↓
-                          ┌────────────────────────┐              ┌──────────────────────┐
-                          │ FindCurrentLine 二分   │              │ ImDrawList 旋转 quad │
-                          └────────────┬───────────┘              └──────────────────────┘
-                                       ↓
-                          ┌─────────────────────────┐
-                          │  osc::Chatbox UDP 发送  │  /chatbox/input
-                          └────────────┬────────────┘
-                                       ↓
-                          ┌─────────────────────────┐
-                          │       VRChat            │
-                          └─────────────────────────┘
-```
-
-**音频中继链路(v2.0 新增)**
+**歌词**
 
 ```
-┌────────────────────────┐
-│ 网易云 cloudmusic.exe   │     audio::process_find  (toolhelp 找根 PID)
-└─────────────┬──────────┘
-              │ 系统音频
-              ↓
-   ┌─────────────────────────────────┐
-   │ audio::ProcessLoopbackCapture   │  WASAPI ActivateAudioInterfaceAsync
-   │ INCLUDE_TARGET_PROCESS_TREE     │  AUDIOCLIENT_ACTIVATION_PARAMS
-   │ 只抓网易云,不抓 VRChat/Discord │  Win10 build 20348+
-   └────────────┬────────────────────┘
-                │ float32 stereo 48k
-                ↓
-   ┌─────────────────────────┐
-   │ audio::RingBuffer       │  SPSC 32KB,2 的幂次 mask,drop-oldest
-   └────────────┬────────────┘
-                ↓
-   ┌─────────────────────────┐
-   │ audio::SoftLimiter      │  增益(默认 -6 dB)+ 硬限幅(ceiling -3 dBFS)
-   │ + peak 计量             │  线性区透传,触顶时介入
-   └────────────┬────────────┘
-                ↓
-   ┌─────────────────────────┐
-   │ audio::WasapiRender     │  shared mode + AUTOCONVERTPCM + EVENTCALLBACK
-   │ 目标: CABLE Input       │  AvSetMmThreadCharacteristics("Pro Audio")
-   └────────────┬────────────┘
-                ↓
-   ┌─────────────────────────┐
-   │ VB-Cable 虚拟声卡       │  CABLE Input → CABLE Output(免费驱动,程序内自动装)
-   └────────────┬────────────┘
-                ↓
-   ┌─────────────────────────┐
-   │  VRChat 麦克风设备       │  Opus 编码 → 房间里其他人能听到
-   └─────────────────────────┘
+播放器 ──SMTC──▶ SmtcWatcher ──切歌──▶ lyrics worker (网易云 / LRCLib)
+                      │                        │
+                      │                        ▼
+                      │                 当前行 + 格式构建器
+                      ▼                        │
+                 圆形封面纹理                   ▼
+                                      OSC /chatbox/input → VRChat
 ```
 
-## 📂 项目结构
+**音频中继**
+
+```
+cloudmusic.exe ──进程 loopback──▶ RingBuffer ──增益/软限幅──▶ CABLE Input
+                                                              │
+                                                     VRChat 麦克风 = CABLE Output
+```
+
+---
+
+## 📂 结构（精简）
 
 ```
 src/
-├── main.cpp                    # 进程入口 + 主循环
-├── host/                       # Win32 窗口 / D3D11 / ImGui 接入 / 系统托盘
-│   ├── win32_window.{h,cpp}    # 无边框 + WM_NCCALCSIZE + DWM 阴影
-│   ├── d3d11_context.{h,cpp}
-│   ├── imgui_host.{h,cpp}
-│   └── tray.{h,cpp}            # Shell_NotifyIcon 封装
-├── menu/                       # GUI
-│   ├── menu.{h,cpp}            # 标签页 / 卡片 / 自定义控件
-│   ├── style.{h,cpp}           # 调色板 + 主题切换动画
-│   ├── MuseoSans700.h          # ⚠ 商业字体,公开发行请替换
-│   └── MuseoSans900.h
-├── playback/                   # SMTC 读取
-│   ├── smtc.{h,cpp}            # C++/WinRT(v3.2-beta: 加 Spotify / YouTube Music 识别)
-│   └── track.h                 # (v3.2-beta: 加 Source 枚举 + match_key)
-├── lyrics/                     # 歌词
-│   ├── netease.{h,cpp}         # music.163.com HTTPS GET
-│   ├── lrclib.{h,cpp}          # (v3.2-beta) LRCLib 客户端,api/get + api/search fallback
-│   ├── lrc_parser.{h,cpp}      # [mm:ss.xx] 解析
-│   └── lyrics_service.{h,cpp}  # worker 线程 + 多 provider 调度(v3.2-beta)
-├── osc/                        # VRChat OSC
-│   ├── osc_message.{h,cpp}     # OSC 1.0 编码
-│   └── chatbox.{h,cpp}         # UDP + rate limit + 去重
-├── audio/                      # 音频中继(v2.0 新增 / v3.0 修 bug + 软限幅)
-│   ├── ring_buffer.h           # SPSC 环形缓冲(32KB,2 的幂次 mask)
-│   ├── limiter.{h,cpp}         # 增益 + 软限幅(v3.0: 15% knee + tanh,无硬切)
-│   ├── process_find.{h,cpp}    # toolhelp 找网易云根 PID
-│   ├── devices.{h,cpp}         # MMDevice 枚举 + VB-Cable 检测
-│   ├── process_loopback.{h,cpp}# WASAPI 进程级 loopback(Win10 20348+, v3.0: 修包丢失 bug)
-│   ├── wasapi_render.{h,cpp}   # shared mode + AUTOCONVERTPCM 渲染
-│   ├── relay.{h,cpp}           # 工作线程编排 + 状态发布(v3.0: 修队列错位 bug)
-│   └── vbcable_installer.{h,cpp}# 自动下载/解压/拉起 VB-Cable 安装器
-├── bilibili/                   # Bilibili 视频解析(v3.0 新增 / v3.2-beta MP4 切换)
-│   └── parser.{h,cpp}          # BV/URL/b23.tv → web-interface/view → playurl(fnval=1 MP4) → CDN 直链
-├── net/winhttp_client.{h,cpp}  # WinHTTP 同步 GET + 不跟随重定向版(v3.0 加,b23.tv 用)
-├── util/
-│   ├── image.{h,cpp}           # WIC 解码 + 圆形 alpha 蒙版 + D3D11 上传
-│   └── foreground.{h,cpp}      # 前台应用识别(v3.1: 加分类枚举 + 80+ 别名表 + IdleSeconds)
-├── config/config.{h,cpp}       # JSON 持久化
-└── i18n/i18n.h                 # 三语 t(en, sc, tc)
-
-deps/
-├── imgui/                      # Dear ImGui (docking 分支,自己 clone)
-└── json/json.hpp               # nlohmann/json 单头文件
+├── main.cpp                 # 入口 + 主循环
+├── host/                    # 窗口 / D3D11 / ImGui / 托盘 / 应用图标
+├── menu/                    # UI、主题、格式构建器
+├── playback/                # SMTC + 粘滞时间线
+├── lyrics/                  # 网易云 / LRCLib / LRC 解析
+├── osc/                     # chatbox UDP + keep-alive
+├── audio/                   # 进程 loopback 中继 + VB-Cable 安装
+├── bilibili/                # 视频解析（含多 P）
+├── net/                     # WinHTTP
+├── util/                    # 封面圆形纹理、前台应用
+├── config/                  # %APPDATA%\vrc-lyrics\config.json
+└── i18n/                    # 中英繁
 ```
+
+---
 
 ## 🛠 技术栈
 
-- **C++20**(MSVC v143)
-- **Win32** 直接调,不依赖 MFC/WTL
-- **D3D11** + **Dear ImGui** (docking 分支)渲染
-- **C++/WinRT** 调 SMTC(`GlobalSystemMediaTransportControlsSessionManager`)
-- **WinHTTP** + **nlohmann/json** 拉网易云歌词
-- **WIC** 解码封面 JPEG/PNG
-- **WASAPI 进程级 loopback**(`ActivateAudioInterfaceAsync` + `AUDIOCLIENT_ACTIVATION_PARAMS`,Win10 20348+)抓网易云音频
-- **VB-Audio Virtual Cable** 作虚拟麦克风桥接,程序内自动下载安装
-- **AvRT** (`AvSetMmThreadCharacteristics("Pro Audio")`) 提升音频线程调度优先级
-- **微软雅黑** 作 CJK fallback,主字体 MuseoSans
-- **DWM** 阴影 + 直角窗口(关圆角)
-- **DPI Per-Monitor V2** 感知
+- C++20 · Win32 · D3D11 · Dear ImGui（docking）
+- C++/WinRT SMTC · WinHTTP · nlohmann/json · WIC
+- WASAPI 进程级 loopback（Win10 20348+）· VB-Cable · AvRT
+- DPI Per-Monitor V2 · DWM 阴影 / Win11 圆角
+
+---
 
 ## ⚙ 配置
 
-设置自动保存到 `%APPDATA%\vrc-lyrics\config.json`,字段:
+路径：`%APPDATA%\vrc-lyrics\config.json`
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `language` | 0/1/2 | EN / 简体 / 繁体 |
-| `theme` | 0/1 | 暗 / 亮 |
-| `osc_host` | string | 默认 127.0.0.1 |
-| `osc_port` | int | 默认 9000(VRChat chatbox) |
-| `rate_limit_ms` | int | OSC 速率限制,默认 1300 |
-| `lyrics_provider` | 0/1/2 | 网易云仅 / 网易云→LRCLib / LRCLib 仅 |
-| `include_translation` | bool | 合并 tlyric 翻译 |
-| `show_foreground_app` | bool | chatbox 前缀加前台应用名 |
-| `send_while_paused` | bool | 暂停时仍发送 |
-| `fmt_lyrics`/`fmt_no_lyrics`/`fmt_paused` | string | chatbox 模板 |
-| `audio_target_device_id` | string | 音频中继目标设备 ID(选 VB-Cable 时自动填) |
-| `audio_gain_db` | float | 中继增益(dB),v3.0 默认从 -6 升到 -3(VRChat 没有自动音量,信号热一点 Opus 信噪比好) |
-| `audio_limiter` | bool | 软限幅器开关,默认开(ceiling -3 dBFS,15% knee tanh,线性区透传) |
-| `audio_autostart` | bool | 网易云一开播就自动启动中继 |
-| `afk_auto` | bool | (v3.1) 键鼠空闲超阈值自动 chatbox 显示 AFK |
-| `afk_threshold_min` | int | (v3.1) AFK 阈值分钟数,默认 5 |
-| `emoji_game`/`emoji_browser`/`emoji_chat`/`emoji_dev`/`emoji_music`/`emoji_office`/`emoji_stream` | string (UTF-8 emoji) | (v3.1) 各分类前缀图标,UI 里可从 4 个候选改 |
+| 字段 | 说明 |
+|------|------|
+| `language` / `theme` | 语言、暗亮主题 |
+| `osc_host` / `osc_port` / `rate_limit_ms` | OSC 目标与限速（默认 127.0.0.1:9000 / 1300ms） |
+| `lyrics_provider` | 0 仅网易云 · 1 网易云→LRCLib · 2 仅 LRCLib |
+| `include_translation` / `send_while_paused` / `show_foreground_app` | 翻译、暂停仍发送、前台应用前缀 |
+| `minimize_to_tray` | 关闭时是否藏托盘（默认 true） |
+| `fmt_builder_lyrics` / `fmt_builder_no_lyrics` | 格式构建器（字段顺序、开关、布局、分隔符） |
+| `fmt_lyrics` / `fmt_no_lyrics` / `fmt_paused` | 旧字符串模板（兼容迁移） |
+| `audio_*` | 中继设备、增益、限幅、自动启动 |
+| `afk_*` / `emoji_*` | AFK 与分类 emoji |
 
-## ⚠ 已知问题
+---
 
-- **部分 VIP / 试听受限歌曲**网易云不返回歌词,会显示"暂无歌词"。
-- **MuseoSans 是商业字体**,本仓库附带的 TTF 字节数组仅供个人构建测试使用,**公开发布前请替换为开源字体**(如 Inter / Manrope,用 `binary_to_compressed_c.cpp` 转 .h)。
-- 切歌瞬间偶尔会有 200ms 左右的歌词空窗(等 HTTP 请求返回),正常现象。
-- 没装 inflink-rs 的话,SMTC 拿不到 NCM-ID,网易云歌词模块拿不到 ID 就只能走 LRCLib 模糊匹配(v3.2-beta);其它源(Spotify / YouTube Music)本来就没 ID,全部走 LRCLib。
-- **Spotify / YouTube Music 歌词命中率不及网易云** —— LRCLib 数据库英文 / 日文歌全,中文歌覆盖率明显低于网易云;原因不是程序问题,是 LRCLib 库本身。
-- **YouTube Music 在浏览器里需要标题保留 ` - YouTube Music` 后缀**(Chrome / Edge / Firefox 等都默认有,Brave 有时被插件改掉就识别不到)。
-- **音频中继**仅在 **私人/朋友房间** 使用 — 公共房间外放音乐通常被视为骚扰,可能被举报封号。
-- **音频中继需 Windows 10 build 20348+ / Windows 11**(进程级 loopback API 要求)。
-- VB-Cable 首次安装后,**个别 Win11 24H2 机器可能需要重启** 才能识别新设备。
-- 整条音频链路最终经过 VRChat 的 Opus 编码,会引入有损压缩,**听众端音质会比本地播放差一些**,属正常现象。**v3.0 起在 Audio 标签里给了一张"音质建议"卡片** —— 关掉 VRChat 的 Voice Processing 能挽回大半高频损失。
-- 升级 v1.0 → v2.0 / v3.0 时,旧 `config.json` 没有新字段,会走新默认值。v3.0 还把音频默认增益从 -6 dB 改成 -3 dB。
-- **Bilibili 视频解析(v3.0 / v3.2-beta)** 拿到的是带签名的 CDN 直链,**有效期 ~2 小时**,过期得重解析;部分需要登录/大会员才能看 1080P 的视频,会自动回落到可用的最高质量;番剧(`ss12345` / `ep12345`)目前不支持(走 PGC 接口,跟 BV 不是同一套 API);**`bilivideo.com` 不在 VRChat 默认信任域名里,听众端需各自开 Allow Untrusted URLs 才能播**(这是 VRChat 客户端设定,程序绕不了)。
-- **v3.2-beta 是 pre-release**,Spotify / YouTube Music 多源、Bilibili 切 MP4、UI 大改都是首次发布,可能有未知 bug。如果旧版工作正常你也可以继续用 v3.1。
-- **v3.3** 修了 SMTC 进度外推(含 YouTube Music 网页端粘滞)、Bilibili 多P、chatbox keep-alive、关闭未响应、亮色主题与应用图标;建议从 v3.2-beta 升级。
-- **YouTube Music 网页端**依赖浏览器 SMTC 会话与标题里的 `YouTube Music` 标记;歌词来自 LRCLib 匹配,冷门曲目可能无词或略有偏移。
+## ⚠ 已知限制
+
+- VIP / 试听受限曲，网易云可能不回歌词  
+- Spotify / YT Music 依赖 **LRCLib**，中文覆盖不如网易云；冷门歌可能无词或略偏  
+- 浏览器 YT Music 标题需带 `YouTube Music` 标记  
+- Bilibili 直链约 2h 有效；需 Allow Untrusted URLs；番剧 ss/ep 暂不支持  
+- 音频中继：Win10 20348+ / Win11；请仅私人房使用；VRChat Opus 会再损一点音质  
+- 仓库内 MuseoSans 为商业字体，**公开发布前请换成开源字体**
+
+---
 
 ## 🙏 鸣谢
 
-- [**BigAtomikku/VRC-Lyrics**](https://github.com/BigAtomikku/VRC-Lyrics) — 原 Python 项目,提供功能蓝本
-- [**apoint123/inflink-rs**](https://github.com/apoint123/inflink-rs) — 让外部程序能读到网易云的关键桥梁
-- [**VB-Audio Software**](https://vb-audio.com/Cable/) — 免费虚拟声卡驱动(v2.0 音频中继依赖)
-- [**wangure0329/bilibili_parse_vrchat**](https://github.com/wangure0329/bilibili_parse_vrchat) — Bilibili 解析接口的参考实现(v3.0 视频解析依据)
-- [**SocialSisterYi/bilibili-API-collect**](https://github.com/SocialSisterYi/bilibili-API-collect) — Bilibili API 文档
-- [**ocornut/imgui**](https://github.com/ocornut/imgui) — Dear ImGui
-- [**nlohmann/json**](https://github.com/nlohmann/json) — JSON for Modern C++
+- [BigAtomikku/VRC-Lyrics](https://github.com/BigAtomikku/VRC-Lyrics) — 功能蓝本  
+- [apoint123/inflink-rs](https://github.com/apoint123/inflink-rs) — 网易云 SMTC 桥  
+- [VB-Audio Software](https://vb-audio.com/Cable/) — 虚拟声卡  
+- [wangure0329/bilibili_parse_vrchat](https://github.com/wangure0329/bilibili_parse_vrchat) · [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)  
+- [ocornut/imgui](https://github.com/ocornut/imgui) · [nlohmann/json](https://github.com/nlohmann/json)
+
+---
 
 ## 📜 License
 
 MIT — 见 [LICENSE](LICENSE)。
 
-字体 (`src/menu/MuseoSans*.h`) 不在 MIT 授权范围内,使用前请自行处理版权问题。
+`src/menu/MuseoSans*.h` **不在** MIT 范围内，使用前请自行处理字体版权。
