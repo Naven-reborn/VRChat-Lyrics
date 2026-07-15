@@ -18,11 +18,12 @@ struct ParseResult {
     bool        ok       = false;
     ErrorCode   error    = ErrorCode::None;
     std::string bvid;       // 解析出来的 BV 号
-    std::string title;      // utf-8 视频标题
+    std::string title;      // utf-8 视频标题(多P时会拼 "总标题 - P名")
     std::string url;        // 最终可在 VRChat 里播放的直链
-    std::string format;     // "DASH" / "FLV"
+    std::string format;     // "DASH" / "FLV" / "MP4"
     std::string quality;    // 实际选中的质量,如 "1440P" / "1080P"
     std::string node;       // 使用的 CDN 节点域名
+    int         page     = 1; // 实际解析到的分P(1-based)
 };
 
 // 同步解析。input 可以是裸 BV 号 / 完整 bilibili.com URL / b23.tv 短链。

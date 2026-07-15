@@ -60,6 +60,7 @@ static const char* CategoryEmojiFromState(const State& s, util::AppCategory cat)
     }
 }
 
+
 std::string EffectiveStatusPrefix(const State& s) {
     // 1. status_override:文本非空 + 倒计时未到 0(或 clear_min == 0 永久)。
     bool override_active = (s.status_override[0] != 0) &&
@@ -182,6 +183,26 @@ namespace icons {
             ImVec2(c.x - pr * 0.4f, c.y - pr),
             ImVec2(c.x + pr * 0.7f, c.y),
             ImVec2(c.x - pr * 0.4f, c.y + pr), col);
+    }
+    // 聊天气泡 + sparkle:一个圆角矩形 + tail + 右上角四角星。
+    static void DrawSparkChat(ImDrawList* dl, ImVec2 c, float size, ImU32 col) {
+        float w = size * 0.42f, h = size * 0.34f;
+        ImVec2 a(c.x - w, c.y - h * 1.05f);
+        ImVec2 b(c.x + w * 0.55f, c.y + h * 0.35f);
+        dl->AddRect(a, b, col, S(3.5f), 0, S(1.6f));
+        // 气泡的尾巴(指向左下)
+        ImVec2 t0(c.x - w * 0.2f, c.y + h * 0.35f);
+        ImVec2 t1(c.x + w * 0.1f, c.y + h * 0.35f);
+        ImVec2 t2(c.x - w * 0.5f, c.y + h * 0.95f);
+        dl->AddTriangleFilled(t0, t1, t2, col);
+        // 右上角的四角星 sparkle
+        float sx = c.x + w * 0.65f, sy = c.y - h * 0.55f;
+        float sr = h * 0.42f;
+        dl->AddLine(ImVec2(sx, sy - sr), ImVec2(sx, sy + sr), col, S(1.5f));
+        dl->AddLine(ImVec2(sx - sr, sy), ImVec2(sx + sr, sy), col, S(1.5f));
+        float sd = sr * 0.55f;
+        dl->AddLine(ImVec2(sx - sd, sy - sd), ImVec2(sx + sd, sy + sd), col, S(1.0f));
+        dl->AddLine(ImVec2(sx + sd, sy - sd), ImVec2(sx - sd, sy + sd), col, S(1.0f));
     }
     static void DrawSun(ImDrawList* dl, ImVec2 c, float size, ImU32 col) {
         float r = size * 0.28f;
@@ -340,17 +361,122 @@ bool NLInputText(const char* id, const char* hint,
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(3);
 
-    // Focus 反馈:沿着输入框轮廓画一圈 accent border,圆角用 FrameRounding,
-    // 这样动画的圆角自动跟输入框一致(原来用底部 underline 时圆角对不上,看着出戏)。
+    // Focus / idle 描边。亮色主题 idle 也画一圈 stroke,避免输入框融进白卡。
     ImGuiID anim_id = ImGui::GetCurrentWindow()->GetID((const void*)((uintptr_t)id ^ 0xA110u));
     float   t       = Anim(anim_id, focused, 16.f);
     float   alpha   = hov ? ImMax(t, 0.30f) : t;
-    if (alpha > 0.005f) {
+    {
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRect(r_min, r_max, U32(col::accent, alpha),
-                    ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+        const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
+        if (alpha > 0.005f) {
+            dl->AddRect(r_min, r_max, U32(col::accent, alpha),
+                        ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+        } else if (lightish) {
+            dl->AddRect(r_min, r_max, U32(col::stroke, 0.95f),
+                        ImGui::GetStyle().FrameRounding, 0, S(1.0f));
+        }
     }
     return changed;
+}
+
+bool NLInputInt(const char* id, const char* hint, int* v,
+                int v_min, int v_max, float width) {
+    if (!v) return false;
+
+    // 每个 id 一份编辑缓冲 + 上次同步出去的 int。编辑中不回写,失焦 / 回车再提交。
+    ImGuiStorage* st = ImGui::GetStateStorage();
+    ImGuiID id_hash  = ImGui::GetID(id);
+    ImGuiID key_sync = id_hash ^ 0xBEEFu;
+    ImGuiID key_slot = id_hash ^ 0xCAFEu;
+
+    // 用 StateStorage 存一个小 slot 索引,指向静态池里的 char 缓冲。
+    // ImGuiStorage 只能存 int/float/void*,不能直接塞 16 字节字符串。
+    struct PortBuf { char s[16]; int last_v; bool used; };
+    static PortBuf pool[8]{};
+    int slot = st->GetInt(key_slot, -1);
+    if (slot < 0 || slot >= 8 || !pool[slot].used) {
+        slot = -1;
+        for (int i = 0; i < 8; ++i) if (!pool[i].used) { slot = i; break; }
+        if (slot < 0) slot = 0; // 极端:复用 0
+        pool[slot].used = true;
+        pool[slot].last_v = *v + 1; // force initial sync
+        st->SetInt(key_slot, slot);
+    }
+    PortBuf& pb = pool[slot];
+
+    bool active = (ImGui::GetActiveID() == id_hash);
+    // 外部改了 *v(读 config / 重置)且当前没在编辑 → 刷缓冲
+    if (!active && pb.last_v != *v) {
+        std::snprintf(pb.s, sizeof(pb.s), "%d", *v);
+        pb.last_v = *v;
+        st->SetInt(key_sync, *v);
+    }
+
+    if (width == 0.f) width = ImGui::GetContentRegionAvail().x;
+    ImGui::SetNextItemWidth(width);
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, col::bg_input);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  col::bg_input);
+    ImGui::PushStyleVar  (ImGuiStyleVar_FramePadding, ImVec2(S(10.f), S(7.f)));
+    ImGui::PushStyleVar  (ImGuiStyleVar_FrameRounding, S(6.f));
+
+    ImGuiInputTextFlags flags = ImGuiInputTextFlags_CharsDecimal |
+                                ImGuiInputTextFlags_CharsNoBlank |
+                                ImGuiInputTextFlags_EnterReturnsTrue;
+    bool enter = hint
+        ? ImGui::InputTextWithHint(id, hint, pb.s, sizeof(pb.s), flags)
+        : ImGui::InputText        (id,       pb.s, sizeof(pb.s), flags);
+
+    ImVec2 r_min = ImGui::GetItemRectMin();
+    ImVec2 r_max = ImGui::GetItemRectMax();
+    bool   hov   = ImGui::IsItemHovered();
+    bool   focused = ImGui::IsItemActive() || ImGui::IsItemFocused();
+    bool   deactivated = ImGui::IsItemDeactivatedAfterEdit();
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(3);
+
+    ImGuiID anim_id = ImGui::GetCurrentWindow()->GetID((const void*)((uintptr_t)id ^ 0xA110u));
+    float   t       = Anim(anim_id, focused, 16.f);
+    float   alpha   = hov ? ImMax(t, 0.30f) : t;
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
+        if (alpha > 0.005f) {
+            dl->AddRect(r_min, r_max, U32(col::accent, alpha),
+                        ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+        } else if (lightish) {
+            dl->AddRect(r_min, r_max, U32(col::stroke, 0.95f),
+                        ImGui::GetStyle().FrameRounding, 0, S(1.0f));
+        }
+    }
+
+    // 回车或失焦提交
+    if (enter || deactivated) {
+        int parsed = 0;
+        // 空串 / 非法 → 保持原值;合法则钳范围
+        bool any_digit = false;
+        for (const char* p = pb.s; *p; ++p) {
+            if (*p >= '0' && *p <= '9') { any_digit = true; break; }
+        }
+        if (any_digit) {
+            parsed = std::atoi(pb.s);
+            if (parsed < v_min) parsed = v_min;
+            if (parsed > v_max) parsed = v_max;
+        } else {
+            parsed = *v;
+            if (parsed < v_min) parsed = v_min;
+            if (parsed > v_max) parsed = v_max;
+        }
+        std::snprintf(pb.s, sizeof(pb.s), "%d", parsed);
+        pb.last_v = parsed;
+        if (parsed != *v) {
+            *v = parsed;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool NLInputTextMultiline(const char* id, const char* hint,
@@ -387,79 +513,276 @@ bool NLInputTextMultiline(const char* id, const char* hint,
     ImGuiID anim_id = ImGui::GetCurrentWindow()->GetID((const void*)((uintptr_t)id ^ 0xA111u));
     float   t       = Anim(anim_id, focused, 16.f);
     float   alpha   = hov ? ImMax(t, 0.30f) : t;
-    if (alpha > 0.005f) {
+    {
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRect(r_min, r_max, U32(col::accent, alpha),
-                    ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+        const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
+        if (alpha > 0.005f) {
+            dl->AddRect(r_min, r_max, U32(col::accent, alpha),
+                        ImGui::GetStyle().FrameRounding, 0, S(1.5f));
+        } else if (lightish) {
+            dl->AddRect(r_min, r_max, U32(col::stroke, 0.95f),
+                        ImGui::GetStyle().FrameRounding, 0, S(1.0f));
+        }
     }
     return changed;
 }
 
-// 自定义 Combo:用 ImGui::BeginCombo 拿到 popup 位置 / 模态 / 焦点管理,
-// 但 preview 部分自己画(圆角 + chevron + focus underline + hover bg)。
+// 自定义 Combo —— 不用 ImGui Popup 栈。
+// 原因:Popup 的点外/Esc 自动关会和关合动画抢状态,导致"闪一下";
+// 改成自绘浮层后,开合完全由我们控制:
+//   - 再点触发框 → 关
+//   - 点其它地方 → 关
+//   - 选中一项 → 关
+//   - 展开:slide + fade + 选项 staggered;关合:对称 ease,无闪烁
 bool NLCombo(const char* id, int* current, const char* const* items, int count, float width) {
-    if (width == 0.f) width = ImGui::GetContentRegionAvail().x;
-    ImGui::SetNextItemWidth(width);
+    if (!current || !items || count <= 0) return false;
+    if (*current < 0 || *current >= count) *current = 0;
 
-    // ImGui::BeginCombo 默认把 preview text 画在框内,这里把它的 frame 配色拉到
-    // 跟我们的 bg_input 一致,然后用 NoArrowButton 关掉 ImGui 自己的箭头,
-    // 之后在右侧补一个自家的 chevron。
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,        col::bg_input);
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, col::bg_hover);
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  col::bg_hover);
-    ImGui::PushStyleColor(ImGuiCol_Button,         col::bg_input);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  col::bg_hover);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   col::bg_hover);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg,        col::bg_card);
-    ImGui::PushStyleColor(ImGuiCol_Header,         ImVec4(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered,  col::bg_hover);
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive,   col::bg_hover);
-    ImGui::PushStyleVar  (ImGuiStyleVar_FramePadding, ImVec2(S(10.f), S(7.f)));
-    ImGui::PushStyleVar  (ImGuiStyleVar_FrameRounding, S(6.f));
-    ImGui::PushStyleVar  (ImGuiStyleVar_PopupRounding, S(8.f));
-    ImGui::PushStyleVar  (ImGuiStyleVar_ItemSpacing, ImVec2(S(4.f), S(2.f)));
-    ImGui::PushStyleVar  (ImGuiStyleVar_WindowPadding, ImVec2(S(4.f), S(6.f)));
+    if (width <= 0.f) width = ImGui::GetContentRegionAvail().x;
+    const float height   = S(32.f);
+    const float rounding = S(6.f);
+    const float item_h   = S(30.f);
+    const float pad_y    = S(6.f);
+    const float gap      = S(2.f);
+    const float popup_h  = pad_y * 2.f + item_h * (float)count + gap * (float)ImMax(0, count - 1);
 
-    const char* preview = (count > 0 && *current >= 0 && *current < count) ? items[*current] : "";
-    bool changed = false;
-    bool open = ImGui::BeginCombo(id, preview, ImGuiComboFlags_NoArrowButton);
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    if (win->SkipItems) return false;
 
-    ImVec2 r_min = ImGui::GetItemRectMin();
-    ImVec2 r_max = ImGui::GetItemRectMax();
-    bool   hov   = ImGui::IsItemHovered();
+    ImGui::PushID(id);
+    ImGuiID btn_id = win->GetID("##btn");
+    ImGuiStorage* st = ImGui::GetStateStorage();
 
-    // chevron 右内嵌 + 圆角 accent border 表达 focus 状态
+    ImGuiID k_vis      = win->GetID("##open_vis");
+    ImGuiID k_want     = win->GetID("##want_open");
+    ImGuiID k_pill     = win->GetID("##pill_y");
+    ImGuiID k_pill0    = win->GetID("##pill_init");
+    ImGuiID k_ignore   = win->GetID("##ignore_out"); // 打开当帧忽略点外关闭
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImRect bb(origin, ImVec2(origin.x + width, origin.y + height));
+    ImGui::ItemSize(bb);
+    if (!ImGui::ItemAdd(bb, btn_id)) {
+        ImGui::PopID();
+        return false;
+    }
+
+    bool hovered = false, held = false;
+    bool pressed = ImGui::ButtonBehavior(bb, btn_id, &hovered, &held);
+
+    bool want_open = st->GetBool(k_want, false);
+    if (pressed) {
+        want_open = !want_open;
+        st->SetBool(k_want, want_open);
+        if (want_open) {
+            st->SetFloat(k_vis, 0.f);
+            st->SetBool(k_pill0, false);
+            // 本帧鼠标还按着,别立刻被"点外"逻辑关掉
+            st->SetBool(k_ignore, true);
+        }
+    }
+
+    float open_vis = st->GetFloat(k_vis, 0.f);
     {
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImGuiID anim_id = ImGui::GetCurrentWindow()->GetID((const void*)((uintptr_t)id ^ 0xC0DEu));
-        float   t_open  = Anim(anim_id, open, 18.f);
-        ImVec2  cc(r_max.x - S(14.f), (r_min.y + r_max.y) * 0.5f);
-        DrawChevron(dl, cc, S(14.f), U32(col::text_dim), t_open);
-        // 圆角 border 跟着 FrameRounding,跟 NLInputText 一致
-        float alpha = ImMax(t_open, hov ? 0.30f : 0.f);
-        if (alpha > 0.005f) {
-            dl->AddRect(r_min, r_max, U32(col::accent, alpha),
-                        ImGui::GetStyle().FrameRounding, 0, S(1.5f));
-        }
+        float dst = want_open ? 1.f : 0.f;
+        float speed = want_open ? 18.f : 16.f;
+        float t = 1.f - std::exp(-speed * ImGui::GetIO().DeltaTime);
+        open_vis = Lerp(open_vis, dst, t);
+        if (std::fabs(open_vis - dst) < 1.f / 512.f) open_vis = dst;
+        st->SetFloat(k_vis, open_vis);
     }
 
-    if (open) {
-        for (int i = 0; i < count; ++i) {
-            bool sel = (i == *current);
-            ImGui::PushID(i);
-            if (ImGui::Selectable(items[i] ? items[i] : "", sel,
-                                  ImGuiSelectableFlags_DontClosePopups)) {
-                *current = i;
-                changed = true;
-                ImGui::CloseCurrentPopup();
+    // 触发框
+    {
+        ImDrawList* dl = win->DrawList;
+        float t_hov = Anim(win->GetID("##hov"),
+                           hovered || held || want_open || open_vis > 0.01f, 14.f);
+        dl->AddRectFilled(bb.Min, bb.Max, Mix(col::bg_input, col::bg_hover, t_hov), rounding);
+
+        float border_a = ImMax(open_vis, t_hov * 0.35f);
+        // 亮色 idle 描边更实,避免下拉框融进白卡
+        const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
+        if (border_a > 0.005f)
+            dl->AddRect(bb.Min, bb.Max, U32(col::accent, border_a), rounding, 0, S(1.5f));
+        else
+            dl->AddRect(bb.Min, bb.Max, U32(col::stroke, lightish ? 0.95f : 0.55f),
+                        rounding, 0, S(1.0f));
+
+        const char* preview = items[*current] ? items[*current] : "";
+        ImVec2 tsz = ImGui::CalcTextSize(preview);
+        dl->PushClipRect(bb.Min, ImVec2(bb.Max.x - S(28.f), bb.Max.y), true);
+        dl->AddText(ImVec2(bb.Min.x + S(10.f), bb.Min.y + (height - tsz.y) * 0.5f),
+                    U32(col::text), preview);
+        dl->PopClipRect();
+
+        DrawChevron(dl, ImVec2(bb.Max.x - S(14.f), (bb.Min.y + bb.Max.y) * 0.5f),
+                    S(14.f), U32(col::text_dim), open_vis);
+    }
+
+    bool changed = false;
+    const bool panel_alive = (want_open || open_vis > 0.001f);
+    if (!panel_alive) {
+        ImGui::PopID();
+        return false;
+    }
+
+    const float ease  = EaseOutCubic(open_vis);
+    const float slide = (1.f - ease) * S(8.f);
+    const float alpha = ease;
+    const ImVec2 panel_pos(bb.Min.x, bb.Max.y + S(4.f) - slide);
+    const ImVec2 panel_sz(width, popup_h);
+    const ImRect panel_bb(panel_pos, ImVec2(panel_pos.x + panel_sz.x, panel_pos.y + panel_sz.y));
+
+    // ---- 全屏透明挡板:吃掉点外点击,不抢触发框 / 面板上的点击 ----
+    // 用独立窗口,避免被 content clip;NoInputs 关掉,自己用 InvisibleButton。
+    {
+        char catcher_name[64];
+        std::snprintf(catcher_name, sizeof(catcher_name), "##nlcombo_catcher_%08X", btn_id);
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+        ImGuiWindowFlags cflags =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoFocusOnAppearing;
+        if (ImGui::Begin(catcher_name, nullptr, cflags)) {
+            ImGui::InvisibleButton("##catch", ImGui::GetIO().DisplaySize);
+            bool ignore = st->GetBool(k_ignore, false);
+            if (ignore && !ImGui::GetIO().MouseDown[0]) {
+                // 打开时那次按下松开后再允许点外关闭
+                st->SetBool(k_ignore, false);
+                ignore = false;
             }
-            ImGui::PopID();
+            if (!ignore && want_open && ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                ImVec2 mp = ImGui::GetIO().MousePos;
+                // 点在触发框或面板上 → 放行(触发框自己 toggle;面板自己选)
+                if (!bb.Contains(mp) && !panel_bb.Contains(mp)) {
+                    want_open = false;
+                    st->SetBool(k_want, false);
+                }
+            }
         }
-        ImGui::EndCombo();
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
     }
 
-    ImGui::PopStyleVar(5);
-    ImGui::PopStyleColor(10);
+    // ---- 下拉面板(普通窗口,不是 popup,无 Esc 自动关) ----
+    {
+        char panel_name[64];
+        std::snprintf(panel_name, sizeof(panel_name), "##nlcombo_panel_%08X", btn_id);
+
+        ImGui::SetNextWindowPos(panel_pos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(panel_sz, ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(ImClamp(alpha, 0.f, 1.f));
+
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, col::bg_input);
+        ImGui::PushStyleColor(ImGuiCol_Border,   col::stroke);
+        ImGui::PushStyleColor(ImGuiCol_Text,     col::text);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   S(8.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(S(4.f), pad_y));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(0.f, gap));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, S(1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha,            ImClamp(alpha, 0.f, 1.f));
+
+        ImGuiWindowFlags pflags =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing;
+
+        if (ImGui::Begin(panel_name, nullptr, pflags)) {
+            // 保证盖在 content / catcher 之上
+            ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+
+            ImDrawList* pdl = ImGui::GetWindowDrawList();
+            ImVec2 content0 = ImGui::GetCursorScreenPos();
+            float pill_target = (float)(*current) * (item_h + gap) + item_h * 0.5f;
+
+            // 交互只在基本展开完后启用,关合过程中不接点击
+            const bool interactive = want_open && open_vis > 0.90f;
+
+            for (int i = 0; i < count; ++i) {
+                ImGui::PushID(i);
+                bool sel = (i == *current);
+                const char* label = items[i] ? items[i] : "";
+
+                float item_start = (float)i * 0.03f;
+                float item_t = (open_vis - item_start) / 0.20f;
+                if (item_t < 0.f) item_t = 0.f;
+                if (item_t > 1.f) item_t = 1.f;
+                float item_ease = EaseOutCubic(item_t);
+                float item_dx   = (1.f - item_ease) * S(6.f);
+                float item_a    = item_ease * alpha;
+
+                ImVec2 row_min = ImGui::GetCursorScreenPos();
+                ImVec2 row_sz(width - S(8.f), item_h);
+                if (interactive) ImGui::InvisibleButton("##row", row_sz);
+                else             ImGui::Dummy(row_sz);
+
+                bool row_hov = interactive && ImGui::IsItemHovered();
+                bool row_clk = interactive && ImGui::IsItemClicked();
+
+                ImVec2 row_max(row_min.x + row_sz.x, row_min.y + row_sz.y);
+                if (sel) pill_target = (row_min.y + row_max.y) * 0.5f - content0.y;
+
+                if ((sel || row_hov) && item_a > 0.01f) {
+                    ImU32 fill = sel ? U32(col::accent, (row_hov ? 0.28f : 0.16f) * item_a)
+                                     : U32(col::bg_hover, 0.95f * item_a);
+                    pdl->AddRectFilled(ImVec2(row_min.x + item_dx, row_min.y),
+                                       row_max, fill, S(5.f));
+                }
+
+                ImVec2 lsz = ImGui::CalcTextSize(label);
+                pdl->AddText(ImVec2(row_min.x + S(12.f) + item_dx,
+                                    row_min.y + (item_h - lsz.y) * 0.5f),
+                             sel ? U32(col::accent, item_a) : U32(col::text, item_a),
+                             label);
+
+                if (row_clk) {
+                    if (*current != i) {
+                        *current = i;
+                        changed = true;
+                    }
+                    want_open = false;
+                    st->SetBool(k_want, false);
+                }
+                ImGui::PopID();
+            }
+
+            // 左侧滑动 pill
+            {
+                bool pill_inited = st->GetBool(k_pill0, false);
+                float pill_y = st->GetFloat(k_pill, pill_target);
+                if (!pill_inited) {
+                    pill_y = pill_target;
+                    st->SetBool(k_pill0, true);
+                } else {
+                    float pt = 1.f - std::exp(-18.f * ImGui::GetIO().DeltaTime);
+                    pill_y = Lerp(pill_y, pill_target, pt);
+                    if (std::fabs(pill_y - pill_target) < 0.25f) pill_y = pill_target;
+                }
+                st->SetFloat(k_pill, pill_y);
+
+                float pill_hh = item_h * 0.55f;
+                float px = content0.x + S(2.f);
+                float py = content0.y + pill_y - pill_hh * 0.5f;
+                pdl->AddRectFilled(ImVec2(px, py),
+                                   ImVec2(px + S(3.f), py + pill_hh),
+                                   U32(col::accent, alpha), S(1.5f));
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(5);
+        ImGui::PopStyleColor(3);
+    }
+
+    ImGui::PopID();
     return changed;
 }
 
@@ -625,7 +948,22 @@ static void CardEnd() {
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->ChannelsSetCurrent(0);
+    // 亮色主题下给卡片一点极轻的投影 + 描边,否则白卡贴在浅灰底上看不出层次。
+    // 暗色保持纯填充(阴影会脏)。用 stroke 的亮度粗判当前主题。
+    const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
+    if (lightish) {
+        // 两层 soft shadow,向下偏 1–2px
+        dl->AddRectFilled(ImVec2(r_min.x, r_min.y + S(2.f)),
+                          ImVec2(r_max.x, r_max.y + S(2.f)),
+                          U32(ImVec4(0.10f, 0.14f, 0.20f, 0.04f)), S(8.f));
+        dl->AddRectFilled(ImVec2(r_min.x, r_min.y + S(1.f)),
+                          ImVec2(r_max.x, r_max.y + S(1.f)),
+                          U32(ImVec4(0.10f, 0.14f, 0.20f, 0.06f)), S(8.f));
+    }
     dl->AddRectFilled(r_min, r_max, U32(col::bg_card), S(8.f));
+    if (lightish) {
+        dl->AddRect(r_min, r_max, U32(col::stroke, 0.90f), S(8.f), 0, S(1.0f));
+    }
     dl->ChannelsMerge();
 
     if (g_card_extra_indent > 0.01f) ImGui::Unindent(g_card_extra_indent);
@@ -801,8 +1139,15 @@ static bool SidebarTab(const char* label, void(*icon)(ImDrawList*, ImVec2, float
 
     float t_hov = Anim(win->GetID((const void*)((uintptr_t)id ^ 2u)), hovered || selected);
 
-    if (t_hov > 0.01f && !selected)
-        win->DrawList->AddRectFilled(bb.Min, bb.Max, U32(col::bg_hover, t_hov * 0.45f), 0.f);
+    // 亮色 sidebar 上选中/hover 需要更实的底,否则几乎看不见。
+    const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
+    if (selected) {
+        win->DrawList->AddRectFilled(bb.Min, bb.Max,
+            U32(col::bg_hover, lightish ? 0.95f : 0.55f), 0.f);
+    } else if (t_hov > 0.01f) {
+        win->DrawList->AddRectFilled(bb.Min, bb.Max,
+            U32(col::bg_hover, t_hov * (lightish ? 0.75f : 0.45f)), 0.f);
+    }
 
     ImU32 fg = Mix(col::text_dim, col::text, selected ? 1.f : t_hov * 0.6f);
     icon(win->DrawList, ImVec2(bb.Min.x + S(22.f), (bb.Min.y + bb.Max.y) * 0.5f), S(16.f), fg);
@@ -1669,13 +2014,32 @@ static void DrawSettings(State& s) {
     }
     CardEnd();
 
+    SectionTitle(i18n::t("BEHAVIOR", "行为", "行為"));
+    CardBegin("##card_behavior");
+    NLToggle(i18n::t("Minimize to tray on close",
+                     "关闭时最小化到托盘后台运行",
+                     "關閉時最小化到系統匣背景執行"),
+             &s.minimize_to_tray);
+    ImGui::PushFont(font_caption);
+    ImGui::TextColored(col::text_dim, "%s",
+        i18n::t("When off, closing the window quits the app.",
+                "关闭后点 X 会直接退出;开启则藏到托盘继续跑歌词/OSC。",
+                "關閉後按 X 會直接結束;開啟則藏到系統匣繼續執行。"));
+    ImGui::PopFont();
+    CardEnd();
+
     SectionTitle("OSC");
     CardBegin("##card_osc");
     ImGui::PushFont(font_body);
     ImGui::TextColored(col::text_dim, "%s", i18n::t("Host", "主机", "主機"));
     ImGui::PopFont();
     NLInputText("##host", nullptr, s.osc_host, sizeof(s.osc_host));
-    NLSliderInt(i18n::t("Port", "端口", "連接埠"), &s.osc_port, 1, 65535);
+    ImGui::PushFont(font_body);
+    ImGui::TextColored(col::text_dim, "%s", i18n::t("Port", "端口", "連接埠"));
+    ImGui::PopFont();
+    // 输入框,默认 9000;只允许 1–65535。滑条拖 65535 档位太难用了。
+    if (s.osc_port < 1 || s.osc_port > 65535) s.osc_port = 9000;
+    NLInputInt("##port", "9000", &s.osc_port, 1, 65535);
     NLSliderInt(i18n::t("Rate limit (ms)", "速率限制 (毫秒)", "速率限制 (毫秒)"),
                 &s.rate_limit_ms, 500, 3000);
     CardEnd();
@@ -1693,6 +2057,7 @@ static void DrawSettings(State& s) {
     ImGui::TextColored(col::text_dim, "%s",
         i18n::t("Provider priority", "提供方优先级", "提供方優先順序"));
     ImGui::PopFont();
+    if (s.lyrics_provider < 0 || s.lyrics_provider > 2) s.lyrics_provider = 0;
     NLCombo("##provider", &s.lyrics_provider, providers, 3);
     NLToggle(i18n::t("Include translation",  "包含翻译",        "包含翻譯"),         &s.include_translation);
     NLToggle(i18n::t("Strip metadata tags",  "去除元数据标签",   "去除中繼資料標籤"), &s.strip_metadata_tags);
@@ -1844,7 +2209,7 @@ void Draw(State& s, int win_w, int win_h) {
                    s.service_running
                      ? i18n::t("\xE2\x97\x8F Service ON",  "\xE2\x97\x8F \xE6\x9C\x8D\xE5\x8A\xA1\xE5\xBC\x80\xE5\x90\xAF", "\xE2\x97\x8F \xE6\x9C\x8D\xE5\x8B\x99\xE9\x96\x8B\xE5\x95\x9F")
                      : i18n::t("\xE2\x97\x8B Service OFF", "\xE2\x97\x8B \xE6\x9C\x8D\xE5\x8A\xA1\xE5\x85\xB3\xE9\x97\xAD", "\xE2\x97\x8B \xE6\x9C\x8D\xE5\x8B\x99\xE9\x97\x9C\xE9\x96\x89"));
-    const char* ver = "v3.2-beta";
+    const char* ver = "v3.3";
     ImVec2 vsz = ImGui::CalcTextSize(ver);
     dl_fg->AddText(ImVec2(f0.x + wsz.x - vsz.x - S(12.f), f0.y + footer_h - S(18.f)),
                    U32(col::text_dim), ver);
@@ -1872,10 +2237,97 @@ void Draw(State& s, int win_w, int win_h) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(28.f) + dx, S(22.f)));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, a);
+    // 内容区滚轮自己做惯性,关掉 ImGui 默认瞬时跳变 + 默认滚动条。
     ImGui::Begin("##content", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoScrollbar);
+
+    // ---- 惯性滚动:吃滚轮 → 速度,每帧指数衰减 → 平滑 ScrollY ----
+    // 切 tab 时内容高度会变,把目标钳到新 max 并清速度,避免飞出。
+    {
+        ImGuiWindow* cwin = ImGui::GetCurrentWindow();
+        static int   s_last_tab = -1;
+        static float s_scroll_vel = 0.f;
+        static float s_scroll_tgt = 0.f;
+        static bool  s_scroll_inited = false;
+
+        int tab_i = (int)s.current_tab;
+        float max_y = cwin ? cwin->ScrollMax.y : 0.f;
+        float cur_y = cwin ? cwin->Scroll.y : 0.f;
+
+        if (!s_scroll_inited || tab_i != s_last_tab) {
+            s_scroll_inited = true;
+            s_last_tab = tab_i;
+            s_scroll_vel = 0.f;
+            s_scroll_tgt = cur_y;
+        }
+
+        // 滚轮:向上为正(ImGui 约定)。乘内容区高度比例,触控板一划也有手感。
+        ImGuiIO& io = ImGui::GetIO();
+        float wheel = io.MouseWheel;
+        // 只在内容区 hover 时接滚轮;combo 弹层打开时不抢。
+        bool content_hov = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        if (content_hov && wheel != 0.f && max_y > 0.f) {
+            float step = ImGui::GetTextLineHeightWithSpacing() * 3.2f;
+            // 触控板连续小值 / 鼠标离散大值都兼容:直接累速度
+            s_scroll_vel -= wheel * step * 14.f;
+            // 同步目标到当前位置,避免旧目标把速度拉回去
+            s_scroll_tgt = cur_y;
+        }
+
+        float dt = io.DeltaTime;
+        if (dt > 0.05f) dt = 0.05f;
+
+        // 指数衰减摩擦系数;速度积分到目标,再 ease 到 ScrollY
+        const float friction = 10.f; // 越大停得越快
+        s_scroll_vel *= std::exp(-friction * dt);
+        if (std::fabs(s_scroll_vel) < 0.5f) s_scroll_vel = 0.f;
+
+        s_scroll_tgt += s_scroll_vel * dt;
+        if (s_scroll_tgt < 0.f)      { s_scroll_tgt = 0.f;      s_scroll_vel = 0.f; }
+        if (s_scroll_tgt > max_y)    { s_scroll_tgt = max_y;    s_scroll_vel = 0.f; }
+
+        // 位置向目标插值 —— 比直接 SetScrollY(target) 更丝滑
+        float follow = 1.f - std::exp(-18.f * dt);
+        float next_y = cur_y + (s_scroll_tgt - cur_y) * follow;
+        if (std::fabs(next_y - s_scroll_tgt) < 0.25f) next_y = s_scroll_tgt;
+        if (cwin && max_y > 0.f) {
+            ImGui::SetScrollY(next_y);
+        } else if (cwin) {
+            ImGui::SetScrollY(0.f);
+            s_scroll_tgt = 0.f;
+            s_scroll_vel = 0.f;
+        }
+
+        // 自绘细滚动条(仅内容可滚时)
+        if (cwin && max_y > 1.f) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 wpos = ImGui::GetWindowPos();
+            ImVec2 wsz  = ImGui::GetWindowSize();
+            float track_w = S(4.f);
+            float pad    = S(4.f);
+            float track_x0 = wpos.x + wsz.x - track_w - pad;
+            float track_y0 = wpos.y + pad;
+            float track_y1 = wpos.y + wsz.y - pad;
+            float track_h  = track_y1 - track_y0;
+            // 可视比例
+            float view_h = cwin->InnerRect.GetHeight();
+            float content_h = view_h + max_y;
+            float grab_h = ImClamp(track_h * (view_h / ImMax(1.f, content_h)), S(18.f), track_h);
+            float tnorm = (max_y > 0.f) ? (next_y / max_y) : 0.f;
+            float grab_y = track_y0 + (track_h - grab_h) * tnorm;
+            // 轨道几乎透明,grab 用 dim 色
+            dl->AddRectFilled(ImVec2(track_x0, track_y0),
+                              ImVec2(track_x0 + track_w, track_y1),
+                              U32(col::stroke, 0.25f), track_w * 0.5f);
+            dl->AddRectFilled(ImVec2(track_x0, grab_y),
+                              ImVec2(track_x0 + track_w, grab_y + grab_h),
+                              U32(col::text_dim, 0.55f), track_w * 0.5f);
+        }
+    }
 
     switch (s.current_tab) {
         case Tab::Lyrics:   DrawLyrics(s);   break;

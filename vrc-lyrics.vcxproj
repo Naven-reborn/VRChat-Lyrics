@@ -40,7 +40,7 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)out\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)out\$(Configuration)\obj\</IntDir>
-    <TargetName>vrc-lyrics-3.2-beta</TargetName>
+    <TargetName>vrc-lyrics-3.3</TargetName>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
@@ -51,7 +51,7 @@
       <PreprocessorDefinitions>WIN32;_WINDOWS;NOMINMAX;WIN32_LEAN_AND_MEAN;UNICODE;_UNICODE;IMGUI_USE_WCHAR32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <AdditionalOptions>/utf-8 /await:strict %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /await %(AdditionalOptions)</AdditionalOptions>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <Link>
@@ -93,6 +93,7 @@
     <ClCompile Include="src\host\d3d11_context.cpp" />
     <ClCompile Include="src\host\imgui_host.cpp" />
     <ClCompile Include="src\host\tray.cpp" />
+    <ClCompile Include="src\host\app_icon.cpp" />
     <ClCompile Include="src\menu\style.cpp" />
     <ClCompile Include="src\menu\menu.cpp" />
     <ClCompile Include="src\osc\osc_message.cpp" />
@@ -131,6 +132,7 @@
     <ClInclude Include="src\host\d3d11_context.h" />
     <ClInclude Include="src\host\imgui_host.h" />
     <ClInclude Include="src\host\tray.h" />
+    <ClInclude Include="src\host\app_icon.h" />
     <ClInclude Include="src\menu\style.h" />
     <ClInclude Include="src\menu\menu.h" />
     <ClInclude Include="src\menu\MuseoSans700.h" />
@@ -159,6 +161,11 @@
     <ClInclude Include="src\audio\vbcable_installer.h" />
 
     <ClInclude Include="src\bilibili\parser.h" />
+
+  </ItemGroup>
+
+  <ItemGroup>
+    <ResourceCompile Include="app.rc" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

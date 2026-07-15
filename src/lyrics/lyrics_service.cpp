@@ -75,9 +75,13 @@ void Service::Worker() {
             lines = FetchLrclibLyrics(q.title, q.artist, q.album, q.duration_sec);
         };
 
+        // 非网易云源(Spotify / YT Music 网页&桌面 / Other)永远需要 LRCLib。
+        // 用户若把 Provider 设成 "Netease only",以前会直接放弃查歌词 ——
+        // 网页 YT Music 就表现为"检测到了歌但没词"。这里:非 NCM 自动走 LRCLib。
         switch (prov) {
             case Provider::NeteaseOnly:
                 try_netease();
+                if (lines.empty() && !q.is_netease) try_lrclib();
                 break;
             case Provider::NeteaseThenLrclib:
                 try_netease();

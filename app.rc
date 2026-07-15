@@ -1,0 +1,4 @@
+// Numeric ID 1 — must match IDI_APPICON / MAKEINTRESOURCE(1) in app_icon.h.
+// Do NOT use an undeclared symbolic name here: rc.exe would treat it as a
+// string name and LoadImage(MAKEINTRESOURCE(1)) would fail silently.
+1 ICON "assets\\app.ico"

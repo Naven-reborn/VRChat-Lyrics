@@ -1,4 +1,5 @@
 #include "win32_window.h"
+#include "app_icon.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 
@@ -63,9 +64,12 @@ LRESULT Win32Window::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return HTCLIENT;
     }
     case WM_CLOSE:
+        // 默认也只置位退出标志,不 DestroyWindow。
+        // 主循环看到 Closed() 后自己有序停线程再 Destroy(),避免关窗未响应。
         m_closed = true;
         return 0;
     case WM_DESTROY:
+        m_closed = true;
         PostQuitMessage(0);
         return 0;
     }
@@ -78,6 +82,11 @@ bool Win32Window::Create(const wchar_t* title, int width, int height) {
     wc.lpfnWndProc = WndProcThunk;
     wc.hInstance = GetModuleHandle(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    // 任务栏 / Alt-Tab / 窗口类图标 —— 嵌入的 VL app.ico。
+    // 先 Unregister,避免热重载/重复启动时沿用旧 class 的默认图标。
+    UnregisterClassW(kClassName, wc.hInstance);
+    wc.hIcon   = LoadAppIcon(true);
+    wc.hIconSm = LoadAppIcon(false);
     wc.lpszClassName = kClassName;
     RegisterClassEx(&wc);
 
@@ -103,8 +112,9 @@ bool Win32Window::Create(const wchar_t* title, int width, int height) {
     BOOL dark = TRUE;
     DwmSetWindowAttribute(m_hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
 
-    // 关掉 Win11 自动圆角,要直角。
-    int corner_pref = 1 /*DWMWCP_DONOTROUND*/;
+    // Win11 系统圆角:ROUND = 默认圆角(约 8px),跟 UI 内 6/8px 圆角统一。
+    // 老系统 / 不支持时 DwmSetWindowAttribute 会失败,窗口保持直角,无害。
+    int corner_pref = 2 /*DWMWCP_ROUND*/;
     DwmSetWindowAttribute(m_hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/,
                           &corner_pref, sizeof(corner_pref));
 
@@ -113,9 +123,15 @@ bool Win32Window::Create(const wchar_t* title, int width, int height) {
     MARGINS margins{ 1, 1, 1, 1 };
     DwmExtendFrameIntoClientArea(m_hwnd, &margins);
 
+    // 图标必须在 ShowWindow 之前设好,否则任务栏会缓存默认空白图标。
+    ApplyAppIcon(m_hwnd);
+
     ShowWindow(m_hwnd, SW_SHOW);
     UpdateWindow(m_hwnd);
     SetForegroundWindow(m_hwnd);
+
+    // Show 之后再设一次,覆盖 shell 可能刚缓存的默认图标。
+    ApplyAppIcon(m_hwnd);
     return true;
 }
 

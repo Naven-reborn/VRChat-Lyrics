@@ -129,13 +129,15 @@ static void ApplyImGuiStyleColors() {
     c[ImGuiCol_TextDisabled]      = col::text_dim;
     c[ImGuiCol_WindowBg]          = col::bg_content;
     c[ImGuiCol_ChildBg]           = col::bg_content;
-    c[ImGuiCol_PopupBg]           = col::bg_card;
+    // 亮色弹层用 input 底,避免跟白卡糊在一起;暗色仍用 card。
+    const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
+    c[ImGuiCol_PopupBg]           = lightish ? col::bg_input : col::bg_card;
     c[ImGuiCol_Border]            = col::stroke;
     c[ImGuiCol_FrameBg]           = col::bg_input;
     c[ImGuiCol_FrameBgHovered]    = col::bg_hover;
     c[ImGuiCol_FrameBgActive]     = col::bg_hover;
     c[ImGuiCol_ScrollbarBg]       = col::bg_content;
-    c[ImGuiCol_ScrollbarGrab]     = col::stroke;
+    c[ImGuiCol_ScrollbarGrab]     = lightish ? col::stroke : col::stroke;
     c[ImGuiCol_ScrollbarGrabHovered] = col::text_dim;
     c[ImGuiCol_ScrollbarGrabActive]  = col::accent_dim;
     c[ImGuiCol_CheckMark]         = col::accent;
@@ -154,25 +156,37 @@ static void ApplyImGuiStyleColors() {
 void ApplyTheme(Theme t) {
     using col::from_rgba;
     if (t == Theme::Light) {
-        // Cool paper-white 底色,微微偏蓝。bg_input 跟 bg_root 拉开一档让输入框
-        // 看得见;bg_card 用纯白做 elevated 卡片。
-        col::bg_root      = from_rgba(249.f, 250.f, 252.f, 255.f);
-        col::bg_sidebar   = from_rgba(240.f, 243.f, 248.f, 255.f);
-        col::bg_content   = from_rgba(249.f, 250.f, 252.f, 255.f);
+        // 亮色主题重做(v3.3):
+        // 旧版几乎全是 240–255 的冷灰白,卡片/输入/背景糊成一片,看起来像"白茫茫"。
+        // 新方向:干净的暖灰内容区 + 纯白 elevated 卡片 + 明确边框层次 + 克制蓝 accent。
+        // 仍保留圆角与蓝色 accent(用户硬规则),不走 vermilion / 硬角。
+        //
+        // 层级(从底到顶):
+        //   content/root  #F0F2F5  冷灰底
+        //   sidebar/title #E8ECF1  再暗一档,跟内容区分开
+        //   card          #FFFFFF  浮起
+        //   input         #F4F6F9  卡片内再凹一档
+        //   hover         #E4EAF2  可交互反馈
+        //   stroke        #D5DCE6  可见但不抢
+        col::bg_root      = from_rgba(240.f, 242.f, 245.f, 255.f);
+        col::bg_sidebar   = from_rgba(232.f, 236.f, 241.f, 255.f);
+        col::bg_content   = from_rgba(240.f, 242.f, 245.f, 255.f);
         col::bg_card      = from_rgba(255.f, 255.f, 255.f, 255.f);
-        col::bg_input     = from_rgba(242.f, 244.f, 249.f, 255.f);
-        col::bg_titlebar  = from_rgba(240.f, 243.f, 248.f, 255.f);
-        col::bg_hover     = from_rgba(228.f, 233.f, 242.f, 255.f);
-        col::stroke       = from_rgba(212.f, 218.f, 228.f, 255.f);
+        col::bg_input     = from_rgba(244.f, 246.f, 249.f, 255.f);
+        col::bg_titlebar  = from_rgba(232.f, 236.f, 241.f, 255.f);
+        col::bg_hover     = from_rgba(228.f, 234.f, 242.f, 255.f);
+        col::stroke       = from_rgba(213.f, 220.f, 230.f, 255.f);
 
-        col::text         = from_rgba( 18.f,  24.f,  32.f, 255.f);
-        col::text_dim     = from_rgba( 95.f, 108.f, 124.f, 255.f);
-        col::text_caption = from_rgba(130.f, 142.f, 158.f, 255.f);
+        // 文字对比度拉高:主字近黑,次级灰,caption 再淡 —— 亮底上 dim 不能太浅。
+        col::text         = from_rgba( 22.f,  28.f,  38.f, 255.f);
+        col::text_dim     = from_rgba( 88.f, 100.f, 118.f, 255.f);
+        col::text_caption = from_rgba(120.f, 132.f, 150.f, 255.f);
 
-        col::accent       = from_rgba( 32.f, 134.f, 184.f, 255.f);
-        col::accent_dim   = from_rgba(118.f, 162.f, 194.f, 255.f);
+        // 亮色 accent 用稍深的青蓝,保证在白底上可读(旧 #2086B8 偏灰,不够利落)。
+        col::accent       = from_rgba( 28.f, 132.f, 196.f, 255.f); // #1C84C4
+        col::accent_dim   = from_rgba(120.f, 170.f, 205.f, 255.f);
 
-        col::dot_off      = from_rgba(150.f, 160.f, 175.f, 255.f);
+        col::dot_off      = from_rgba(160.f, 170.f, 184.f, 255.f);
         col::dot_on       = from_rgba(255.f, 255.f, 255.f, 255.f);
     } else {
         // 暖中性 off-black,不是纯 #000;input 比 root 略亮一档,card 再亮一档。

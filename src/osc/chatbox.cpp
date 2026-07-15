@@ -60,9 +60,17 @@ bool Chatbox::SendRaw(const std::string& text) {
 }
 
 bool Chatbox::TrySend(const std::string& text) {
-    if (text == m_last_text) return false;  // dedupe identical lines
     auto now = clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_send).count();
+
+    // 相同文案:以前直接 drop,暂停后进度/歌词都不变 → 永远不再发 →
+    // VRChat chatbox 大约 20–30s 无刷新就自己清掉,气泡消失。
+    // 现在相同文案在 keep-alive 窗口内才 dedupe;过了窗口强制再刷一次。
+    if (text == m_last_text) {
+        if (elapsed < m_keepalive_ms) return false;
+        return SendRaw(text);
+    }
+
     if (elapsed < m_rate_limit_ms) return false;
     return SendRaw(text);
 }

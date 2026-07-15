@@ -1,4 +1,5 @@
 #include "tray.h"
+#include "app_icon.h"
 #include <shellapi.h>
 #include <cstring>
 
@@ -16,7 +17,8 @@ static NOTIFYICONDATAW MakeNid(HWND owner, const wchar_t* tip) {
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = TrayIcon::kMsgId;
-    nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    // 托盘用小图标(16x16),跟任务栏一致。
+    nid.hIcon = LoadAppIcon(false);
     if (tip) {
         wcsncpy_s(nid.szTip, tip, _TRUNCATE);
     }
@@ -77,7 +79,10 @@ bool TrayIcon::HandleMessage(UINT msg, WPARAM /*wp*/, LPARAM lp) {
                 TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
                 pt.x, pt.y, 0, m_owner, nullptr);
             DestroyMenu(menu);
+            // 结束菜单后补一条,让下一次右键也能正常弹出。
+            PostMessageW(m_owner, WM_NULL, 0, 0);
             if (cmd == 1 && OnShow) OnShow();
+            // Exit:只置退出标志,不要在托盘回调里做重活/join 线程。
             if (cmd == 2 && OnQuit) OnQuit();
             return true;
         }

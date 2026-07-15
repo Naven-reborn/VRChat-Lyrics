@@ -68,30 +68,65 @@ std::vector<LrcLine> FetchLrclibLyrics(const std::string& title,
             status, body.size(), title.c_str(), artist.c_str());
 
     if (status == 404 || !ok) {
-        // 精确匹配没结果时再试 /api/search 拿头条 —— 用户改了元数据 / 翻唱版本会触发这条。
-        std::string s_url = "https://lrclib.net/api/search?track_name=" + UrlEncode(title);
-        if (!artist.empty()) s_url += "&artist_name=" + UrlEncode(artist);
-        std::string s_body;
-        int s_status = 0;
-        bool s_ok = net::HttpGet(s_url, headers, s_body, s_status);
-        DiagLog("search status=%d body=%zu", s_status, s_body.size());
-        if (!s_ok || s_body.empty()) return {};
-        try {
-            auto arr = nlohmann::json::parse(s_body, nullptr, false);
-            if (arr.is_discarded() || !arr.is_array() || arr.empty()) return {};
-            // 头条往往是最好匹配 —— LRCLib 自己有相关度排序。
-            const auto& first = arr[0];
-            if (!first.contains("syncedLyrics") || !first["syncedLyrics"].is_string()) {
-                DiagLog("search top hit has no syncedLyrics");
+        // 精确匹配没结果时再试 /api/search。
+        // YT Music 网页端元数据经常脏(Title 里塞 Artist、duration 偏差),
+        // 所以 search 不只取头条:在前几条里挑有 syncedLyrics、时长最接近的。
+        auto try_search = [&](const std::string& q_title, const std::string& q_artist) -> std::vector<LrcLine> {
+            if (q_title.empty()) return {};
+            std::string s_url = "https://lrclib.net/api/search?track_name=" + UrlEncode(q_title);
+            if (!q_artist.empty()) s_url += "&artist_name=" + UrlEncode(q_artist);
+            std::string s_body;
+            int s_status = 0;
+            bool s_ok = net::HttpGet(s_url, headers, s_body, s_status);
+            DiagLog("search status=%d body=%zu q_title=%.60s q_artist=%.40s",
+                    s_status, s_body.size(), q_title.c_str(), q_artist.c_str());
+            if (!s_ok || s_body.empty()) return {};
+            try {
+                auto arr = nlohmann::json::parse(s_body, nullptr, false);
+                if (arr.is_discarded() || !arr.is_array() || arr.empty()) return {};
+
+                int best_i = -1;
+                int best_score = -1;
+                int n = (int)arr.size();
+                if (n > 8) n = 8; // 只看前 8 条,够用
+                for (int i = 0; i < n; ++i) {
+                    const auto& hit = arr[i];
+                    if (!hit.contains("syncedLyrics") || !hit["syncedLyrics"].is_string()) continue;
+                    if (hit["syncedLyrics"].get_ref<const std::string&>().empty()) continue;
+                    int score = 100 - i * 5; // 相关度排序靠前加分
+                    if (duration_sec > 0 && hit.contains("duration") && hit["duration"].is_number()) {
+                        int d = 0;
+                        if (hit["duration"].is_number_integer()) d = hit["duration"].get<int>();
+                        else d = (int)hit["duration"].get<double>();
+                        int dd = d - duration_sec;
+                        if (dd < 0) dd = -dd;
+                        // ±2s 内满分,超过逐步扣
+                        if (dd <= 2) score += 40;
+                        else if (dd <= 5) score += 20;
+                        else if (dd <= 10) score += 5;
+                        else score -= 10;
+                    }
+                    if (score > best_score) { best_score = score; best_i = i; }
+                }
+                if (best_i < 0) {
+                    DiagLog("search: no hit with syncedLyrics in top %d", n);
+                    return {};
+                }
+                std::string lrc = arr[best_i]["syncedLyrics"].get<std::string>();
+                auto lines = ParseLrc(lrc);
+                DiagLog("search picked #%d score=%d lines=%zu", best_i, best_score, lines.size());
+                return lines;
+            } catch (...) {
                 return {};
             }
-            std::string lrc = first["syncedLyrics"].get<std::string>();
-            auto lines = ParseLrc(lrc);
-            DiagLog("search parsed %zu lines", lines.size());
-            return lines;
-        } catch (...) {
-            return {};
+        };
+
+        auto lines = try_search(title, artist);
+        // 再兜底:artist 为空 / 匹配失败时,只靠 title 搜一次
+        if (lines.empty() && !artist.empty()) {
+            lines = try_search(title, {});
         }
+        return lines;
     }
 
     try {

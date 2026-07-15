@@ -28,6 +28,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <vector>
 #include <shellscalingapi.h>
 
 #pragma comment(lib, "Shcore.lib")
@@ -85,10 +86,25 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     tray.OnQuit = [&]() { window.Quit(); };
     tray.Install(window.Hwnd(), L"VRC Lyrics");
 
+    menu::State menu_state;
+    config::Load(menu_state);
+    menu::ApplyTheme(menu_state.theme);
+    Log("config loaded");
+
     window.SetMessageHook([&](HWND h, UINT m, WPARAM w, LPARAM l, bool& handled) -> LRESULT {
-        // 关窗时只藏到托盘,服务继续在后台跑。
+        // 关窗:设置里 "关闭时最小化到托盘" 开着 → 藏托盘继续跑;
+        // 关掉 → 真正退出。
+        // 重要:无论哪条路径都 handled=true 并 return 0,阻止 DefWindowProc
+        // 走默认 DestroyWindow。真正的资源释放在主循环退出后顺序做,
+        // 否则 WM_DESTROY 进消息泵 + 主线程还在 join 后台线程 = 假死未响应。
         if (m == WM_CLOSE) {
-            window.Hide();
+            if (menu_state.minimize_to_tray) {
+                window.Hide();
+            } else {
+                // 立刻藏起来,用户不会看到"未响应"灰窗;后台线程在 loop 退出后停。
+                window.Hide();
+                window.Quit();   // 置 m_closed,主循环下一轮退出
+            }
             handled = true;
             return 0;
         }
@@ -96,10 +112,6 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         return gui.WndProc(h, m, w, l, handled);
     });
 
-    menu::State menu_state;
-    config::Load(menu_state);
-    menu::ApplyTheme(menu_state.theme);
-    Log("config loaded");
     int frame = 0;
     Log("entering loop");
 
@@ -179,9 +191,12 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     ID3D11ShaderResourceView* current_srv  = nullptr;
     ID3D11ShaderResourceView* previous_srv = nullptr;
 
-    // 显示位置做单调钳位,过滤 SMTC 轮询带来的小幅回跳(避免秒数 53→54→53→54 闪烁)。
+    // 显示位置做单调钳位,过滤 SMTC 外推/采样抖动带来的小幅回跳
+    // (避免秒数 53→54→53→54 闪烁,以及歌词行来回跳)。
+    // 只有真正的 seek(回退 > 1.5s)或切歌才允许位置往回走。
     std::string monotonic_id;
     int64_t     monotonic_pos_ms = 0;
+    playback::Status monotonic_status = playback::Status::Stopped;
 
     // 前台应用名查询要打开进程句柄,有点开销 —— 500ms 一次足够,不每帧查。
     auto last_fg_query = std::chrono::steady_clock::now() - std::chrono::seconds(1);
@@ -247,13 +262,37 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             int64_t pos = t->EffectivePositionMs(now_ms);
             // 用 match_key 做切歌识别,跨 source 都稳。
             if (t->match_key != monotonic_id) {
-                monotonic_id = t->match_key;
+                monotonic_id     = t->match_key;
                 monotonic_pos_ms = pos;
+                monotonic_status = t->status;
             } else {
-                int64_t delta = pos - monotonic_pos_ms;
-                if (delta >= 0 || delta < -2000) monotonic_pos_ms = pos;
+                // 暂停/停止:直接采信当前值。
+                // 播放中:
+                //   - 浏览器粘滞源(YT Music 网页):几乎只允许前进,小回跳全吞掉;
+                //     seek 阈值放到 3s,避免被卡死的 raw 把进度拽回十几秒前。
+                //   - 其它源:小回跳(<1.5s)过滤,大回退当 seek。
+                if (t->status != playback::Status::Playing) {
+                    monotonic_pos_ms = pos;
+                } else {
+                    int64_t delta = pos - monotonic_pos_ms;
+                    const int64_t seek_back = t->sticky_timeline ? -3000 : -1500;
+                    if (delta >= 0 || delta < seek_back) monotonic_pos_ms = pos;
+                    // 从暂停恢复播放时,允许立刻对齐到外推位置(即使略回退)。
+                    if (monotonic_status != playback::Status::Playing &&
+                        t->status == playback::Status::Playing) {
+                        monotonic_pos_ms = pos;
+                    }
+                    // 粘滞源播放中:若外推位置比钳位位置超前,每帧跟上去
+                    // (避免 monotonic 卡在旧值而 Effective 已经往前走)。
+                    if (t->sticky_timeline && pos > monotonic_pos_ms) {
+                        monotonic_pos_ms = pos;
+                    }
+                }
+                monotonic_status = t->status;
             }
-            menu_state.np_pos_ms = (int)monotonic_pos_ms;
+            // 歌词行和 UI 进度条统一用钳位后的位置,避免两套时钟打架。
+            pos = monotonic_pos_ms;
+            menu_state.np_pos_ms = (int)pos;
             menu_state.np_dur_ms = (int)t->duration_ms;
 
             lyrics.SetIncludeTranslation(menu_state.include_translation);
@@ -316,14 +355,25 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
         if (menu_state.service_running) {
             char buf[600];
+            buf[0] = 0;
             // 用 menu 的统一逻辑算前缀(override > AFK > 前台应用)。
             std::string prefix_s = menu::EffectiveStatusPrefix(menu_state);
             const char* prefix = prefix_s.c_str();
-            if (menu_state.np_detected && menu_state.np_has_lyrics && current_line.size()) {
+
+            // 暂停时是否仍推音乐:受 send_while_paused 控制。
+            // 关掉时跳过曲目行,只推状态前缀(有的话);否则会一直占着 chatbox。
+            const bool music_ok = menu_state.np_detected &&
+                (menu_state.np_playing || menu_state.send_while_paused);
+
+            if (music_ok && menu_state.np_has_lyrics && current_line.size() &&
+                menu_state.np_playing) {
+                // 有歌词且正在播:推当前行(暂停时歌词行会冻住,改走下面的 paused 模板)
                 std::snprintf(buf, sizeof(buf),
                     "%s\xE2\x96\xB6\xEF\xB8\x8F %s - %s\n\xF0\x9F\x8E\xA4 %s",
                     prefix, menu_state.np_title, menu_state.np_artist, current_line.c_str());
-            } else if (menu_state.np_detected) {
+            } else if (music_ok) {
+                // 无歌词,或暂停但仍发送:歌名 + 进度。
+                // 暂停文案是静态的,靠 chatbox keep-alive 周期性重发,避免 ~30s 被 VRC 清掉。
                 int p = menu_state.np_pos_ms / 1000, d = menu_state.np_dur_ms / 1000;
                 const char* icon = menu_state.np_playing
                     ? "\xE2\x96\xB6\xEF\xB8\x8F" : "\xE2\x8F\xB8\xEF\xB8\x8F";
@@ -331,8 +381,8 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                               prefix, icon, menu_state.np_title, menu_state.np_artist,
                               p / 60, p % 60, d / 60, d % 60);
             } else if (!prefix_s.empty()) {
-                // 没音乐但有状态前缀(自定义/AFK/前台):只发状态那一行,
-                // 把末尾 " · " 切掉,显示干净的 "💤 AFK" 或 "🎮 VRChat"。
+                // 没音乐(或暂停且不允许发送)但有状态前缀(自定义/AFK/前台):
+                // 只发状态那一行,把末尾 " · " 切掉,显示干净的 "💤 AFK" 或 "🎮 VRChat"。
                 std::string trimmed = prefix_s;
                 // " \xC2\xB7 " 是 " · " 的 UTF-8(共 4 字节)
                 if (trimmed.size() >= 4 &&
@@ -340,11 +390,16 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                     trimmed.resize(trimmed.size() - 4);
                 }
                 std::snprintf(buf, sizeof(buf), "%s", trimmed.c_str());
-            } else {
-                std::snprintf(buf, sizeof(buf), "\xF0\x9F\x8E\xB5 VRC Lyrics test #%d",
-                              test_counter);
+            } else if (!menu_state.np_detected) {
+                // 完全没内容时不要刷 test 计数 —— 以前会每 rate_limit 改一次文案,
+                // 现在有 keep-alive 后 test 计数反而会让气泡无意义地跳动。
+                // 保持静默:不发送。
+                buf[0] = 0;
             }
-            if (chatbox.TrySend(buf)) test_counter++;
+
+            if (buf[0]) {
+                if (chatbox.TrySend(buf)) test_counter++;
+            }
         }
         last_running = menu_state.service_running;
 
@@ -483,10 +538,21 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                     if (r.ok) {
                         st->url   = r.url;
                         st->title = r.title;
-                        // 拼一下展示 meta:质量 · 格式 · 节点
-                        st->meta  = r.quality;
-                        if (!r.format.empty()) { st->meta += " \xC2\xB7 "; st->meta += r.format; }
-                        if (!r.node.empty())   { st->meta += " \xC2\xB7 "; st->meta += r.node; }
+                        // 拼一下展示 meta:P? · 质量 · 格式 · 节点
+                        // 多P 视频显示实际解析到的分P,方便用户确认不是默认P1。
+                        st->meta.clear();
+                        if (r.page > 0) {
+                            st->meta = "P";
+                            st->meta += std::to_string(r.page);
+                        }
+                        auto append_meta = [&](const std::string& piece) {
+                            if (piece.empty()) return;
+                            if (!st->meta.empty()) st->meta += " \xC2\xB7 ";
+                            st->meta += piece;
+                        };
+                        append_meta(r.quality);
+                        append_meta(r.format);
+                        append_meta(r.node);
                         st->status.store(2);
                     } else {
                         st->error = [&]() -> std::string {
@@ -529,6 +595,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             }
         }
 
+
         if (menu_state.save_request) {
             menu_state.save_request = false;
             if (config::Save(menu_state)) {
@@ -540,7 +607,13 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
 
         if (visible) {
-            const float clear[4] = { 0.082f, 0.098f, 0.122f, 1.f };
+            // 清屏色跟主题 content 底对齐,避免窗口边缘闪一圈暗边(尤其亮色主题)。
+            const float clear[4] = {
+                menu::col::bg_content.x,
+                menu::col::bg_content.y,
+                menu::col::bg_content.z,
+                1.f
+            };
             d3d.BeginFrame(clear);
             gui.Render();
             d3d.Present(false);
@@ -558,18 +631,38 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     }
     Log("loop exited");
 
-    chatbox.ForceSend("");
-    config::Save(menu_state);   // auto-save on quit
-    g_audio.Stop();
-    lyrics.Stop();
-    smtc.Stop();
+    // 退出顺序很关键:
+    //  1) 先摘托盘,避免退出过程中用户再点图标
+    //  2) 停音频 / 歌词 / SMTC(可能 join 几百 ms,窗口此时已 Hide,不会灰屏)
+    //  3) 再存配置、释放 GPU / GUI / 窗口
+    // 绝不要在 WM_CLOSE 回调里 join 线程。
     tray.Remove();
-    chatbox.Shutdown();
-    if (current_srv)  current_srv->Release();
-    if (previous_srv) previous_srv->Release();
-    gui.Shutdown();   Log("gui shutdown ok");
-    d3d.Destroy();    Log("d3d destroy ok");
-    window.Destroy(); Log("window destroy ok");
+    Log("tray removed");
+
+
+    try { chatbox.ForceSend(""); } catch (...) {}
+    try { g_audio.Stop(); } catch (...) {}
+    Log("audio stopped");
+
+    try { lyrics.Stop(); } catch (...) {}
+    Log("lyrics stopped");
+
+    try { smtc.Stop(); } catch (...) {}
+    Log("smtc stopped");
+
+    try { config::Save(menu_state); } catch (...) {}  // auto-save on quit
+    Log("config saved on quit");
+
+    try { chatbox.Shutdown(); } catch (...) {}
+    if (current_srv)  { current_srv->Release();  current_srv  = nullptr; }
+    if (previous_srv) { previous_srv->Release(); previous_srv = nullptr; }
+    try { gui.Shutdown(); } catch (...) {}
+    Log("gui shutdown ok");
+    try { d3d.Destroy(); } catch (...) {}
+    Log("d3d destroy ok");
+    try { window.Destroy(); } catch (...) {}
+    Log("window destroy ok");
     if (com_init_main) CoUninitialize();
+    Log("== exit ==");
     return 0;
 }

@@ -7,6 +7,7 @@
 **v3.0:Bilibili 视频解析直链 + 音频中继音质修复**
 **v3.1:Activity 标签升级为状态中心(自定义状态 / AFK / 分类前缀) + 完整 emoji 支持**
 **v3.2-beta:多源歌词(Spotify / YouTube Music via LRCLib)+ Bilibili 输出 MP4 单文件(解决 VRChat "不支持的链接")+ UI 大改(自定义控件 / 滑动 sidebar 指示 / 卡片 staggered 动画)**
+**v3.3:SMTC 进度外推修复(Spotify/YTMusic/浏览器歌词与进度丝滑)+ YouTube Music 网页端粘滞外推 + Bilibili 多P分集(`?p=N`)+ 惯性滚动 / 亮色主题 / 托盘开关 / 应用图标**
 
 C++ + ImGui · 中英繁三语 · 暗亮主题
 
@@ -32,8 +33,14 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
   程序内点 "下载并安装" → 自动下载官方驱动包 → 解压 → 拉起 UAC 安装器 → 自动验证,无需手动折腾。
 - 🎚 **增益 + 硬限幅器(v2.0 新增 / v3.0 升级)**
   防爆音兜底,线性区完全透传,只在快爆音时介入。v3.0 把硬切换成 15% knee + tanh 渐进,消除给 Opus "添乱" 的奇次谐波。带实时峰值表。
-- 🎬 **Bilibili 视频解析 → VRChat 视频播放器(v3.0 新增 / v3.2-beta 切到 MP4)**
-  贴 BV 号 / 完整 bilibili 链接 / b23.tv 短链,一键解析出能直接丢进 VRChat 视频播放器的直链。v3.2-beta 起从 DASH(`fnval=16`)切到 MP4 单文件(`fnval=1`),URL 后缀 `.mp4` —— 所有 VRChat 视频播放器(AVPro / Unity VideoPlayer / ProTV / USharpVideo / Yamabushi)都能识别,**彻底解决 v3.1 报 "不支持的链接" 的问题**。代价:画质上限 1080P,但视频墙够用了。
+- 🎬 **Bilibili 视频解析 → VRChat 视频播放器(v3.0 新增 / v3.2-beta 切到 MP4 / v3.3 多P)**
+  贴 BV 号 / 完整 bilibili 链接 / b23.tv 短链,一键解析出能直接丢进 VRChat 视频播放器的直链。v3.2-beta 起从 DASH(`fnval=16`)切到 MP4 单文件(`fnval=1`),URL 后缀 `.mp4` —— 所有 VRChat 视频播放器(AVPro / Unity VideoPlayer / ProTV / USharpVideo / Yamabushi)都能识别,**彻底解决 v3.1 报 "不支持的链接" 的问题**。代价:画质上限 1080P,但视频墙够用了。**v3.3 起识别 URL 里的 `?p=N` / `page=N`(短链重定向后的 p 也会带上),按 `data.pages[]` 取对应分P 的 cid,不再永远解析成第 1 集。**
+- ⏱ **播放进度外推(v3.3 修复)**
+  SMTC 的 `Position` 在 Spotify / YouTube Music / 浏览器里经常几秒才跳一次。v3.3 起用 `LastUpdatedTime` 做外推锚点 + 单调钳位;对 **YouTube Music 网页端** 额外做粘滞外推(浏览器时间线卡死时本地继续走表),避免歌词冻在十几秒前。
+- 🖱 **内容区惯性滚动(v3.3)**
+  滚轮带速度衰减与平滑跟随,不再生硬跳页。
+- 🔔 **关闭行为可选(v3.3)**
+  Settings 里可开关「关闭时最小化到托盘」;关掉则点 X 真正退出。
 - 🎮 **附加当前前台应用**
   打游戏时自动加上"🎮 VRChat · 🎵 ...",别人能看到你在干啥。v3.1 起按 **应用分类**(游戏/浏览器/聊天/IDE/音乐/办公/创作)用不同 emoji,每类 4 个候选可在 UI 里改。
 - 🪪 **状态中心(v3.1 新增)**
@@ -80,9 +87,9 @@ C++ + ImGui · 中英繁三语 · 暗亮主题
 
 ### 跑起来
 
-1. 从 [Releases](../../releases) 下载 `vrc-lyrics.exe`(或自己编译,见下)
+1. 从 [Releases](../../releases) 下载 `vrc-lyrics-3.3.exe`(或自己编译,见下)
 2. 启动网易云,随便播一首歌
-3. 双击 `vrc-lyrics.exe`,Home 应该立刻显示曲目信息和封面
+3. 双击 `vrc-lyrics-3.3.exe`,Home 应该立刻显示曲目信息和封面
 4. 点 **Start**,VRChat chatbox 出现 "▶️ 歌名 - 艺人\n🎤 当前歌词"
 5. 点关闭按钮藏到托盘,服务继续后台运行;托盘右键 Exit 才真退出
 
@@ -131,7 +138,7 @@ build.bat Release
 build.bat Debug
 ```
 
-产物在 `out\Release\vrc-lyrics.exe`。
+产物在 `out\Release\vrc-lyrics-3.3.exe`。
 
 也可以直接 VS 打开 `vrc-lyrics.sln` F5 调试。
 
@@ -311,6 +318,8 @@ deps/
 - 升级 v1.0 → v2.0 / v3.0 时,旧 `config.json` 没有新字段,会走新默认值。v3.0 还把音频默认增益从 -6 dB 改成 -3 dB。
 - **Bilibili 视频解析(v3.0 / v3.2-beta)** 拿到的是带签名的 CDN 直链,**有效期 ~2 小时**,过期得重解析;部分需要登录/大会员才能看 1080P 的视频,会自动回落到可用的最高质量;番剧(`ss12345` / `ep12345`)目前不支持(走 PGC 接口,跟 BV 不是同一套 API);**`bilivideo.com` 不在 VRChat 默认信任域名里,听众端需各自开 Allow Untrusted URLs 才能播**(这是 VRChat 客户端设定,程序绕不了)。
 - **v3.2-beta 是 pre-release**,Spotify / YouTube Music 多源、Bilibili 切 MP4、UI 大改都是首次发布,可能有未知 bug。如果旧版工作正常你也可以继续用 v3.1。
+- **v3.3** 修了 SMTC 进度外推(含 YouTube Music 网页端粘滞)、Bilibili 多P、chatbox keep-alive、关闭未响应、亮色主题与应用图标;建议从 v3.2-beta 升级。
+- **YouTube Music 网页端**依赖浏览器 SMTC 会话与标题里的 `YouTube Music` 标记;歌词来自 LRCLib 匹配,冷门曲目可能无词或略有偏移。
 
 ## 🙏 鸣谢
 

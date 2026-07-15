@@ -58,6 +58,7 @@ void Load(menu::State& s) {
     s.theme = (menu::Theme)th;
     get_bool("send_while_paused",  s.send_while_paused);
     get_bool("show_foreground_app",s.show_foreground_app);
+    get_bool("minimize_to_tray",   s.minimize_to_tray);
     get_str ("osc_host",           s.osc_host, sizeof(s.osc_host));
     get_int ("osc_port",           s.osc_port);
     get_int ("rate_limit_ms",      s.rate_limit_ms);
@@ -95,6 +96,7 @@ bool Save(const menu::State& s) {
     j["theme"]              = (int)s.theme;
     j["send_while_paused"]  = s.send_while_paused;
     j["show_foreground_app"]= s.show_foreground_app;
+    j["minimize_to_tray"]   = s.minimize_to_tray;
     j["osc_host"]           = s.osc_host;
     j["osc_port"]           = s.osc_port;
     j["rate_limit_ms"]      = s.rate_limit_ms;

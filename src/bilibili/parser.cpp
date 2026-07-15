@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdarg>
+#include <cstring>
 #include <string>
 
 namespace bilibili {
@@ -59,6 +60,48 @@ static std::string ExtractBv(const std::string& s) {
     return {};
 }
 
+// 从 URL / 任意串里抠分 P 序号。
+// 覆盖: ?p=6 / &p=6 / #page=6 / ?page=6。找不到返回 1(B站默认第1P)。
+// 注意:CDN 直链里的其它 p= 参数我们只在原始 bilibili.com / b23 输入上找,
+// 所以扫整串即可,数字再离谱也会被后面 pages[] 边界钳住。
+static int ExtractPage(const std::string& s) {
+    auto try_key = [&](const char* key) -> int {
+        size_t n = std::strlen(key);
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t found = s.find(key, pos);
+            if (found == std::string::npos) return 0;
+            // 前面必须是 '?' / '&' / '#' / 串首,避免误匹配 "spm=..." 之类。
+            if (found > 0) {
+                char prev = s[found - 1];
+                if (prev != '?' && prev != '&' && prev != '#') {
+                    pos = found + n;
+                    continue;
+                }
+            }
+            size_t i = found + n;
+            if (i >= s.size() || !std::isdigit((unsigned char)s[i])) {
+                pos = found + n;
+                continue;
+            }
+            int v = 0;
+            while (i < s.size() && std::isdigit((unsigned char)s[i])) {
+                v = v * 10 + (s[i] - '0');
+                if (v > 9999) break; // 防溢出;B站分P 实际远小于此
+                ++i;
+            }
+            if (v > 0) return v;
+            pos = found + n;
+        }
+        return 0;
+    };
+    int p = try_key("p=");
+    if (p > 0) return p;
+    p = try_key("page=");
+    if (p > 0) return p;
+    return 1;
+}
+
 // b23.tv/xxx → 完整 bilibili.com URL。利用 net::ResolveRedirect 拿 Location 头,
 // 不下载目标页面 HTML(VS 那边以前下载整页太慢)。
 static std::string ResolveShortLink(const std::string& url) {
@@ -75,8 +118,15 @@ static std::string ResolveShortLink(const std::string& url) {
     return {};
 }
 
-// 输入预处理:抠 BV。返回空串表示拿不到。
-static std::string NormalizeToBv(const std::string& input_in) {
+// 输入预处理:抠 BV + 分P。bvid 空串表示拿不到。
+// 短链会先 resolve 再抠(短链本身没有 BV / p,全在 Location 里)。
+struct NormalizedInput {
+    std::string bvid;
+    int         page = 1;
+};
+
+static NormalizedInput NormalizeInput(const std::string& input_in) {
+    NormalizedInput out;
     // 去掉首尾空白,VRChat 玩家从聊天框复制经常带空格/换行。
     std::string input = input_in;
     while (!input.empty() && (input.front() == ' ' || input.front() == '\t' ||
@@ -85,41 +135,48 @@ static std::string NormalizeToBv(const std::string& input_in) {
     while (!input.empty() && (input.back() == ' ' || input.back() == '\t' ||
                               input.back() == '\r' || input.back() == '\n'))
         input.pop_back();
-    if (input.empty()) return {};
+    if (input.empty()) return out;
 
-    // 先看裸文本里有没有 BV(覆盖 "BV1..." / "...video/BV1..." / 包含 BV 的任意串)。
-    {
-        std::string bv = ExtractBv(input);
-        if (!bv.empty()) return bv;
-    }
+    // 先从原串抠 BV / p(完整 bilibili.com 链接、裸 BV、带 ?p= 的任意串)。
+    out.bvid = ExtractBv(input);
+    out.page = ExtractPage(input);
 
-    // 短链:走重定向。
-    if (input.find("b23.tv/") != std::string::npos) {
-        std::string resolved = ResolveShortLink(input);
-        if (!resolved.empty()) {
-            std::string bv = ExtractBv(resolved);
-            if (!bv.empty()) return bv;
+    // 短链:走重定向。Location 上既有 BV 也常带 p=。
+    if (out.bvid.empty() || input.find("b23.tv/") != std::string::npos) {
+        if (input.find("b23.tv/") != std::string::npos) {
+            std::string resolved = ResolveShortLink(input);
+            if (!resolved.empty()) {
+                if (out.bvid.empty()) out.bvid = ExtractBv(resolved);
+                // 原串没写 p= 时,用重定向目标上的;原串写了就以用户为准。
+                if (ExtractPage(input) == 1) {
+                    int rp = ExtractPage(resolved);
+                    if (rp > 1) out.page = rp;
+                }
+            }
         }
     }
-    return {};
+    if (out.page < 1) out.page = 1;
+    return out;
 }
 
 ParseResult Parse(const std::string& input) {
     ParseResult r;
 
-    std::string bvid = NormalizeToBv(input);
-    if (bvid.empty()) {
+    NormalizedInput ni = NormalizeInput(input);
+    if (ni.bvid.empty()) {
         r.error = ErrorCode::NoBv;
         DiagLog("parse: no BV in input='%s'", input.c_str());
         return r;
     }
-    r.bvid = bvid;
-    DiagLog("parse: bv=%s", bvid.c_str());
+    r.bvid = ni.bvid;
+    r.page = ni.page;
+    DiagLog("parse: bv=%s page=%d", ni.bvid.c_str(), ni.page);
 
-    // Step 1: web-interface/view → cid + title
+    // Step 1: web-interface/view → 按 pages[p-1] 取 cid + 标题
+    // data.cid 永远是 P1 的 cid,多P视频必须走 data.pages[]。
     int64_t cid = 0;
     {
-        std::string url = "https://api.bilibili.com/x/web-interface/view?bvid=" + bvid;
+        std::string url = "https://api.bilibili.com/x/web-interface/view?bvid=" + ni.bvid;
         std::string body;
         int status = 0;
         if (!net::HttpGet(url, kCommonHeaders, body, status)) {
@@ -137,10 +194,68 @@ ParseResult Parse(const std::string& input) {
                 return r;
             }
             const auto& data = j["data"];
-            if (data.contains("cid") && data["cid"].is_number_integer())
-                cid = data["cid"].get<int64_t>();
+            std::string main_title;
             if (data.contains("title") && data["title"].is_string())
-                r.title = data["title"].get<std::string>();
+                main_title = data["title"].get<std::string>();
+
+            // pages: [{cid, page, part, duration, ...}, ...]
+            // page 字段是 1-based 分P号;数组下标通常 page-1,但保险起见按 page 字段匹配。
+            int pages_count = 0;
+            if (data.contains("pages") && data["pages"].is_array()) {
+                const auto& pages = data["pages"];
+                pages_count = (int)pages.size();
+                int want = ni.page;
+                if (want < 1) want = 1;
+                if (pages_count > 0 && want > pages_count) {
+                    DiagLog("page %d out of range (max %d), clamp to last", want, pages_count);
+                    want = pages_count;
+                }
+                r.page = want;
+
+                // 1) 按 page 字段精确匹配
+                for (const auto& pg : pages) {
+                    int pg_no = pg.value("page", 0);
+                    if (pg_no == want) {
+                        if (pg.contains("cid") && pg["cid"].is_number_integer())
+                            cid = pg["cid"].get<int64_t>();
+                        std::string part;
+                        if (pg.contains("part") && pg["part"].is_string())
+                            part = pg["part"].get<std::string>();
+                        if (pages_count > 1 && !part.empty())
+                            r.title = main_title + " - P" + std::to_string(want) + " " + part;
+                        else if (pages_count > 1)
+                            r.title = main_title + " - P" + std::to_string(want);
+                        else
+                            r.title = main_title;
+                        break;
+                    }
+                }
+                // 2) 回退:按数组下标 want-1
+                if (cid == 0 && want >= 1 && want <= pages_count) {
+                    const auto& pg = pages[want - 1];
+                    if (pg.contains("cid") && pg["cid"].is_number_integer())
+                        cid = pg["cid"].get<int64_t>();
+                    std::string part;
+                    if (pg.contains("part") && pg["part"].is_string())
+                        part = pg["part"].get<std::string>();
+                    if (pages_count > 1 && !part.empty())
+                        r.title = main_title + " - P" + std::to_string(want) + " " + part;
+                    else if (pages_count > 1)
+                        r.title = main_title + " - P" + std::to_string(want);
+                    else
+                        r.title = main_title;
+                }
+            }
+
+            // 单P / pages 缺失:退回 data.cid(即 P1)
+            if (cid == 0) {
+                if (data.contains("cid") && data["cid"].is_number_integer())
+                    cid = data["cid"].get<int64_t>();
+                r.title = main_title;
+                r.page  = 1;
+            }
+            DiagLog("view ok pages=%d picked page=%d cid=%lld title=%s",
+                    pages_count, r.page, (long long)cid, r.title.c_str());
         } catch (...) {
             r.error = ErrorCode::JsonInvalid;
             return r;
@@ -163,7 +278,7 @@ ParseResult Parse(const std::string& input) {
         std::snprintf(url_buf, sizeof(url_buf),
             "https://api.bilibili.com/x/player/playurl?"
             "bvid=%s&cid=%lld&qn=80&fnval=1&platform=html5",
-            bvid.c_str(), (long long)cid);
+            r.bvid.c_str(), (long long)cid);
 
         std::string body;
         int status = 0;

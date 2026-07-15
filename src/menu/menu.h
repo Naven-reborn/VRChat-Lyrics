@@ -77,6 +77,8 @@ struct State {
     int  lyrics_provider = 0; // 0=Netease only, 1=Netease then LRCLib, 2=LRCLib only
     bool include_translation = false;
     bool strip_metadata_tags = true;
+    // 关窗时最小化到托盘后台跑(默认开)。关掉则真正退出进程。
+    bool minimize_to_tray = true;
     char fmt_lyrics[256]    = "{status} {name} - {artist}\n{mic} {lyrics}";
     char fmt_no_lyrics[256] = "{status} {name} - {artist}";
     char fmt_paused[256]    = "{status} {name} - {artist}";
@@ -141,6 +143,10 @@ void NLDivider();
 // width <= 0 表示占满 ContentRegionAvail。返回值含义同 ImGui::* 同名函数。
 bool NLInputText(const char* id, const char* hint,
                  char* buf, size_t buf_size, float width = 0.f);
+// 整数输入框(只允许数字)。失焦 / 回车时把文本解析回 *v 并钳到 [v_min, v_max]。
+// 编辑中不回写,避免跟输入光标打架。返回 true 表示 *v 变了。
+bool NLInputInt(const char* id, const char* hint, int* v,
+                int v_min, int v_max, float width = 0.f);
 // 多行编辑框。flags 直传 ImGui(主要用 ReadOnly)。
 bool NLInputTextMultiline(const char* id, const char* hint,
                           char* buf, size_t buf_size,
