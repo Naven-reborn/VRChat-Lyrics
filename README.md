@@ -188,7 +188,7 @@ src/
 - 浏览器 YT Music 标题需带 `YouTube Music` 标记  
 - Bilibili 直链约 2h 有效；需 Allow Untrusted URLs；番剧 ss/ep 暂不支持  
 - 音频中继：Win10 20348+ / Win11；请仅私人房使用；VRChat Opus 会再损一点音质  
-- 仓库内 MuseoSans 为商业字体，**公开发布前请换成开源字体**
+- 仓库内 MuseoSans 为**商业字体**
 
 ---
 
