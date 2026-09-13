@@ -17,6 +17,10 @@
 #include "audio/vbcable_installer.h"
 #include "bilibili/parser.h"
 #include "imgui.h"
+#ifdef VRC_UI_TEST
+#include "host/ui_test.h"
+#include "bilibili/parser_checks.h"
+#endif
 
 #include <d3d11.h>
 #include <windowsx.h>
@@ -39,7 +43,11 @@ static void Log(const char* msg) {
     if (f) { fputs(msg, f); fputs("\n", f); fclose(f); }
 }
 
-int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
+int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR args, int) {
+#ifdef VRC_UI_TEST
+    if (wcsstr(args,L"--bili-network-check")) return bilibili::NetworkChecks();
+    if (wcsstr(args, L"--ui-capture")) return host::RunUiCapture(args);
+#endif
     // 必须在创建窗口前声明 Per-Monitor DPI 感知,否则 Windows 会对窗口做双线性
     // 放大,字会糊。老 Windows 上自动 fallback 到旧的 Per-Monitor。
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
@@ -63,9 +71,14 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     Log("== start ==");
     host::Win32Window window;
-    int w = (int)(780.f * menu::ui_scale);
-    int h = (int)(540.f * menu::ui_scale);
-    if (!window.Create(L"VRC Lyrics", w, h)) { Log("window failed"); return 1; }
+    int w = (int)(1000.f * menu::ui_scale);
+    int h = (int)(680.f * menu::ui_scale);
+    RECT work_area{};
+    if (SystemParametersInfo(SPI_GETWORKAREA, 0, &work_area, 0)) {
+        w = (std::min)(w, (int)(work_area.right-work_area.left)-32);
+        h = (std::min)(h, (int)(work_area.bottom-work_area.top)-32);
+    }
+    if (!window.Create(L"VRC Lyrics 3.4", w, h)) { Log("window failed"); return 1; }
     window.SetDragRegion((int)(40 * menu::ui_scale));
     window.SetTitleButtonZone((int)(180 * menu::ui_scale));
     Log("window ok");
@@ -87,8 +100,82 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     tray.Install(window.Hwnd(), L"VRC Lyrics");
 
     menu::State menu_state;
+#ifdef VRC_UI_TEST
+    menu_state.language = i18n::Lang::SC;
+    menu_state.theme = menu::Theme::Blur;
+    menu_state.include_translation = true;
+    menu_state.minimize_to_tray = false;
+#endif
     config::Load(menu_state);
-    menu::ApplyTheme(menu_state.theme);
+#ifdef VRC_UI_TEST
+    // Separate settings; never automatically broadcast audio in the test build.
+    menu_state.audio_autostart = false;
+#endif
+    BOOL animations_enabled = TRUE;
+    if (SystemParametersInfo(SPI_GETCLIENTAREAANIMATION, 0, &animations_enabled, 0) && !animations_enabled)
+        menu_state.lyric_motion = menu_state.ui_motion = false;
+    // theme 枚举只认 0..2;旧 config / 手改可能写出越界值。
+    if ((int)menu_state.theme < 0 || (int)menu_state.theme > 2)
+        menu_state.theme = menu::Theme::Dark;
+
+    // composition swapchain 启动就绑好,主题切换只改:
+    //   1) DWM Acrylic on/off
+    //   2) 调色板(Blur 大面透明 / Dark·Light 不透明)
+    //   3) clear alpha
+    // 不再销毁 HWND swapchain —— 那是"旧主题垫底"的根因。
+    if (!d3d.CompositionActive()) {
+        Log("composition swapchain missing — blur unavailable");
+    }
+
+    // Blur clear tint: light frost under panels (panels themselves carry most opacity).
+    // Keep alpha modest so Acrylic still reads as glass, not a solid sheet.
+    auto make_clear = [&](bool blur, float clear[4]) {
+        if (blur) {
+            // premultiplied clear tint; alpha scales with blur_opacity (default 55 → ~0.27)
+            const float a = menu::BlurClearAlpha(menu_state.blur_opacity);
+            clear[0] = (16.f / 255.f) * a;
+            clear[1] = (18.f / 255.f) * a;
+            clear[2] = (24.f / 255.f) * a;
+            clear[3] = a;
+        } else {
+            clear[0] = menu::col::bg_content.x;
+            clear[1] = menu::col::bg_content.y;
+            clear[2] = menu::col::bg_content.z;
+            clear[3] = 1.f;
+        }
+    };
+    auto flush_clear = [&](bool blur) {
+        float clear[4];
+        make_clear(blur, clear);
+        d3d.ClearAllBuffers(clear);
+    };
+
+    auto apply_backdrop = [&](menu::Theme t) -> menu::Theme {
+        const bool want = menu::ThemeWantsBlur(t);
+        if (want) {
+            if (!d3d.CompositionActive()) {
+                Log("blur requested but composition inactive - fall back Dark");
+                window.SetAcrylicBlur(false);
+                return menu::Theme::Dark;
+            }
+            if (!window.SetAcrylicBlur(true)) {
+                Log("acrylic FAILED - fall back Dark");
+                return menu::Theme::Dark;
+            }
+            d3d.SetPremultipliedAlpha(true);
+            Log("acrylic on (composition kept)");
+            return t;
+        }
+        window.SetAcrylicBlur(false);
+        d3d.SetPremultipliedAlpha(false);
+        return t;
+    };
+
+    menu_state.theme = apply_backdrop(menu_state.theme);
+    menu::SnapTheme(menu_state.theme, menu_state.blur_opacity);
+    flush_clear(menu::ThemeWantsBlur(menu_state.theme));
+    menu::Theme applied_theme = menu_state.theme;
+    int last_blur_opacity = menu_state.blur_opacity;
     Log("config loaded");
 
     window.SetMessageHook([&](HWND h, UINT m, WPARAM w, LPARAM l, bool& handled) -> LRESULT {
@@ -147,13 +234,10 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     // Bilibili 解析:同样的"worker 写 atomic+mutex,主循环每帧镜像到 menu_state"模式。
     // 用 shared_ptr 让 detached worker 独立持有,主线程退出时不会 dangling。
     struct VideoParseState {
-        std::atomic<int>  status{ 0 };  // 0=idle 1=parsing 2=ok 3=error
-        std::mutex        mu;
-        std::string       url;
-        std::string       title;
-        std::string       meta;
-        std::string       error;
-        std::atomic<bool> running{ false };
+        std::atomic<bool> running{false};
+        std::mutex mu;
+        bilibili::ParseResult result;
+        unsigned revision=0;
     };
     auto video_state = std::make_shared<VideoParseState>();
 
@@ -189,6 +273,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     std::string current_cover_ncm;
     ID3D11ShaderResourceView* current_srv  = nullptr;
+    ID3D11ShaderResourceView* square_srv = nullptr;
     ID3D11ShaderResourceView* previous_srv = nullptr;
 
     // 显示位置做单调钳位,过滤 SMTC 外推/采样抖动带来的小幅回跳
@@ -253,6 +338,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             menu_state.np_detected = true;
             menu_state.np_playing  = (t->status == playback::Status::Playing);
             menu_state.np_source   = (int)t->source;
+            menu_state.np_track_key = t->match_key;
             copy_safe(menu_state.np_title,  sizeof(menu_state.np_title),  t->title);
             copy_safe(menu_state.np_artist, sizeof(menu_state.np_artist), t->artist);
             copy_safe(menu_state.np_album,  sizeof(menu_state.np_album),  t->album);
@@ -312,6 +398,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 if (previous_srv) { previous_srv->Release(); previous_srv = nullptr; }
                 previous_srv = current_srv;
                 current_srv  = nullptr;
+                if (square_srv) { square_srv->Release(); square_srv = nullptr; }
                 current_cover_ncm = t->match_key;
                 if (!t->thumbnail_bytes.empty()) {
                     current_srv = util::CreateCircularTexture(
@@ -319,11 +406,15 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                         t->thumbnail_bytes.data(),
                         t->thumbnail_bytes.size(),
                         (int)(128 * menu::ui_scale));
+                    square_srv = util::CreateCircularTexture(d3d.Device(),
+                        t->thumbnail_bytes.data(), t->thumbnail_bytes.size(),
+                        (int)(160 * menu::ui_scale), false);
                 }
                 menu_state.cover_swap_anim = 0.f;
             }
             menu_state.cover_srv      = (void*)current_srv;
             menu_state.cover_srv_prev = (void*)previous_srv;
+            menu_state.cover_square_srv = square_srv;
 
             auto bundle = lyrics.Current();
             menu_state.np_has_lyrics = (bundle && bundle->has_lyrics() && bundle->match_key == t->match_key);
@@ -337,10 +428,39 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             menu_state.np_has_lyrics = false;
             menu_state.np_current_line[0] = 0;
             menu_state.np_source = 0;
+            menu_state.np_track_key.clear();
+            menu_state.np_playing = false;
+            menu_state.np_pos_ms = menu_state.np_dur_ms = 0;
+            menu_state.cover_square_srv = nullptr;
             lyrics::Query empty; lyrics.Request(empty);  // clear
         }
 
+        // 同步主题 → Acrylic / clear 语义。
+        // 颜色过渡由 menu::BeginThemeTransition + TickThemeTransition 负责;
+        // 这里只在 theme 枚举变化时切 DWM Acrylic,并刷掉 flip 缓冲残帧。
+        // Draw 前跑一次;Draw 后再跑一次,接住本帧标题栏/设置里的点击。
+        auto sync_theme = [&]() {
+            if (menu_state.theme == applied_theme) return;
+            menu::Theme resolved = apply_backdrop(menu_state.theme);
+            if (resolved != menu_state.theme) {
+                // Acrylic 不可用:打断 UI 过渡,落到 Dark。
+                menu_state.theme = resolved;
+                menu::SnapTheme(resolved, menu_state.blur_opacity);
+            }
+            // 不在这里 SnapTheme 成功路径 —— 保留 BeginThemeTransition 的 300ms lerp。
+            flush_clear(menu::ThemeWantsBlur(resolved) || window.AcrylicEnabled());
+            applied_theme = menu_state.theme;
+        };
+        sync_theme();
+
         if (visible) menu::Draw(menu_state, window.Width(), window.Height());
+        sync_theme();
+        // dragging blur opacity: next frame make_clear uses new alpha
+        if (menu_state.theme == menu::Theme::Blur) {
+            last_blur_opacity = menu_state.blur_opacity;
+        } else {
+            last_blur_opacity = menu_state.blur_opacity;
+        }
 
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_settings_sync).count() > 1000) {
@@ -354,51 +474,36 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             chatbox.ForceSend("");
         }
         if (menu_state.service_running) {
-            char buf[600];
-            buf[0] = 0;
             // 用 menu 的统一逻辑算前缀(override > AFK > 前台应用)。
             std::string prefix_s = menu::EffectiveStatusPrefix(menu_state);
-            const char* prefix = prefix_s.c_str();
 
             // 暂停时是否仍推音乐:受 send_while_paused 控制。
-            // 关掉时跳过曲目行,只推状态前缀(有的话);否则会一直占着 chatbox。
             const bool music_ok = menu_state.np_detected &&
                 (menu_state.np_playing || menu_state.send_while_paused);
 
-            if (music_ok && menu_state.np_has_lyrics && current_line.size() &&
-                menu_state.np_playing) {
-                // 有歌词且正在播:推当前行(暂停时歌词行会冻住,改走下面的 paused 模板)
-                std::snprintf(buf, sizeof(buf),
-                    "%s\xE2\x96\xB6\xEF\xB8\x8F %s - %s\n\xF0\x9F\x8E\xA4 %s",
-                    prefix, menu_state.np_title, menu_state.np_artist, current_line.c_str());
-            } else if (music_ok) {
-                // 无歌词,或暂停但仍发送:歌名 + 进度。
-                // 暂停文案是静态的,靠 chatbox keep-alive 周期性重发,避免 ~30s 被 VRC 清掉。
-                int p = menu_state.np_pos_ms / 1000, d = menu_state.np_dur_ms / 1000;
-                const char* icon = menu_state.np_playing
-                    ? "\xE2\x96\xB6\xEF\xB8\x8F" : "\xE2\x8F\xB8\xEF\xB8\x8F";
-                std::snprintf(buf, sizeof(buf), "%s%s %s - %s [%d:%02d / %d:%02d]",
-                              prefix, icon, menu_state.np_title, menu_state.np_artist,
-                              p / 60, p % 60, d / 60, d % 60);
+            std::string msg;
+            if (music_ok) {
+                const bool has_line = menu_state.np_has_lyrics && !current_line.empty();
+                msg = menu::RenderChatbox(
+                    menu_state,
+                    prefix_s.c_str(),
+                    menu_state.np_playing,
+                    has_line,
+                    current_line.c_str());
             } else if (!prefix_s.empty()) {
-                // 没音乐(或暂停且不允许发送)但有状态前缀(自定义/AFK/前台):
-                // 只发状态那一行,把末尾 " · " 切掉,显示干净的 "💤 AFK" 或 "🎮 VRChat"。
+                // 没音乐(或暂停且不允许发送)但有状态前缀:
+                // 只发状态那一行,把末尾 " · " 切掉。
                 std::string trimmed = prefix_s;
-                // " \xC2\xB7 " 是 " · " 的 UTF-8(共 4 字节)
                 if (trimmed.size() >= 4 &&
                     trimmed.compare(trimmed.size() - 4, 4, " \xC2\xB7 ") == 0) {
                     trimmed.resize(trimmed.size() - 4);
                 }
-                std::snprintf(buf, sizeof(buf), "%s", trimmed.c_str());
-            } else if (!menu_state.np_detected) {
-                // 完全没内容时不要刷 test 计数 —— 以前会每 rate_limit 改一次文案,
-                // 现在有 keep-alive 后 test 计数反而会让气泡无意义地跳动。
-                // 保持静默:不发送。
-                buf[0] = 0;
+                msg = std::move(trimmed);
             }
+            // 完全没内容:静默,不刷 test 计数。
 
-            if (buf[0]) {
-                if (chatbox.TrySend(buf)) test_counter++;
+            if (!msg.empty()) {
+                if (chatbox.TrySend(msg)) test_counter++;
             }
         }
         last_running = menu_state.service_running;
@@ -516,82 +621,62 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             }
         }
 
-        // ---- Bilibili parser per-frame wiring ----
+        // Parser results are published once, with options captured before dispatch.
         {
-            // 起 worker:已经有一个在跑就忽略,防止用户连点按钮把网卡塞满。
-            if (menu_state.video_parse_request && !video_state->running.load()) {
-                menu_state.video_parse_request = false;
-                std::string input = menu_state.video_input;
-                video_state->running.store(true);
-                video_state->status.store(1);
-                {
-                    std::lock_guard<std::mutex> lk(video_state->mu);
-                    video_state->url.clear();
-                    video_state->title.clear();
-                    video_state->meta.clear();
-                    video_state->error.clear();
+            static unsigned received_revision=0;
+            if(menu_state.video_parse_request && !video_state->running.load()) {
+                menu_state.video_parse_request=false;
+                const std::string input=menu_state.video_input;
+                bilibili::ParseOptions options;
+                if(!menu_state.video_input_changed) {
+                    const auto& pages=menu_state.video_result.pages;
+                    if(menu_state.video_page_index>=0 && menu_state.video_page_index<(int)pages.size())
+                        options.page=pages[menu_state.video_page_index].number;
+                    const auto& qualities=menu_state.video_result.qualities;
+                    const int qi=menu_state.video_quality_index-1;
+                    if(qi>=0 && qi<(int)qualities.size())options.quality=qualities[qi].id;
                 }
-                auto st = video_state;
-                std::thread([st, input]() {
-                    auto r = bilibili::Parse(input);
-                    std::lock_guard<std::mutex> lk(st->mu);
-                    if (r.ok) {
-                        st->url   = r.url;
-                        st->title = r.title;
-                        // 拼一下展示 meta:P? · 质量 · 格式 · 节点
-                        // 多P 视频显示实际解析到的分P,方便用户确认不是默认P1。
-                        st->meta.clear();
-                        if (r.page > 0) {
-                            st->meta = "P";
-                            st->meta += std::to_string(r.page);
-                        }
-                        auto append_meta = [&](const std::string& piece) {
-                            if (piece.empty()) return;
-                            if (!st->meta.empty()) st->meta += " \xC2\xB7 ";
-                            st->meta += piece;
-                        };
-                        append_meta(r.quality);
-                        append_meta(r.format);
-                        append_meta(r.node);
-                        st->status.store(2);
-                    } else {
-                        st->error = [&]() -> std::string {
-                            switch (r.error) {
-                                case bilibili::ErrorCode::NoBv:
-                                    return "No BV id found in the input.";
-                                case bilibili::ErrorCode::ShortlinkFailed:
-                                    return "Failed to resolve b23.tv short link.";
-                                case bilibili::ErrorCode::Network:
-                                    return "Network error (timeout / DNS).";
-                                case bilibili::ErrorCode::Api:
-                                    return "Bilibili API rejected (region locked or login required).";
-                                case bilibili::ErrorCode::NoStream:
-                                    return "No playable stream returned.";
-                                case bilibili::ErrorCode::JsonInvalid:
-                                    return "Invalid JSON response.";
-                                default: return "Unknown error.";
-                            }
-                        }();
-                        st->status.store(3);
-                    }
+                menu_state.video_status=1;
+                menu_state.video_result_url[0]=0;
+                menu_state.video_last_input=input;
+                video_state->running.store(true);
+                auto st=video_state;
+                std::thread([st,input,options] {
+                    auto result=bilibili::Parse(input,options);
+                    { std::lock_guard<std::mutex> lock(st->mu);st->result=std::move(result);++st->revision; }
                     st->running.store(false);
                 }).detach();
             }
-
-            // 镜像 worker 状态到 menu_state(主线程持锁短,worker 写锁短,
-            // 不会卡 UI 帧时间)。
-            menu_state.video_status = video_state->status.load();
             {
-                std::lock_guard<std::mutex> lk(video_state->mu);
-                copy_safe(menu_state.video_result_url,   sizeof(menu_state.video_result_url),   video_state->url);
-                copy_safe(menu_state.video_result_title, sizeof(menu_state.video_result_title), video_state->title);
-                copy_safe(menu_state.video_result_meta,  sizeof(menu_state.video_result_meta),  video_state->meta);
-                copy_safe(menu_state.video_error,        sizeof(menu_state.video_error),        video_state->error);
+                std::lock_guard<std::mutex> lock(video_state->mu);
+                if(received_revision!=video_state->revision) {
+                    received_revision=video_state->revision;
+                    // Editing the input during a request must not publish stale results.
+                    if(menu_state.video_last_input==menu_state.video_input) {
+                        menu_state.video_result=video_state->result;
+                        const auto& result=menu_state.video_result;
+                        menu_state.video_status=result.ok?2:3;
+                        menu_state.video_input_changed=false;
+                        menu_state.video_stream_index=0;
+                        menu_state.video_page_index=0;
+                        menu_state.video_quality_index=0;
+                        for(size_t i=0;i<result.qualities.size();++i)
+                            if(result.qualities[i].id==result.requested_quality)menu_state.video_quality_index=(int)i+1;
+                        for(size_t i=0;i<result.pages.size();++i)
+                            if(result.pages[i].number==result.page)menu_state.video_page_index=(int)i;
+                        copy_safe(menu_state.video_result_url,sizeof(menu_state.video_result_url),result.url);
+                        copy_safe(menu_state.video_result_title,sizeof(menu_state.video_result_title),result.title);
+                        copy_safe(menu_state.video_error,sizeof(menu_state.video_error),result.message);
+                    } else { menu_state.video_status=0; }
+                }
             }
-
-            if (menu_state.video_copy_request) {
-                menu_state.video_copy_request = false;
+            if(menu_state.video_copy_request) {
+                menu_state.video_copy_request=false;
                 copy_to_clipboard(menu_state.video_result_url);
+            }
+            if(menu_state.video_copy_source_request) {
+                menu_state.video_copy_source_request=false;
+                copy_to_clipboard(menu_state.video_result.source_url.c_str());
             }
         }
 
@@ -607,13 +692,20 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
 
         if (visible) {
-            // 清屏色跟主题 content 底对齐,避免窗口边缘闪一圈暗边(尤其亮色主题)。
-            const float clear[4] = {
-                menu::col::bg_content.x,
-                menu::col::bg_content.y,
-                menu::col::bg_content.z,
-                1.f
-            };
+            // clear 跟调色板一起过渡(ThemeTransitionT 0→1)。
+            // acrylic 在切主题瞬间已切换,所以 blur_now = 目标是否 Blur。
+            float clear[4];
+            const bool blur_now = window.AcrylicEnabled();
+            if (menu::ThemeTransitionActive()) {
+                float a_from[4], a_to[4];
+                make_clear(!blur_now, a_from); // 上一主题
+                make_clear(blur_now,  a_to);   // 目标主题
+                const float t = menu::ThemeTransitionT();
+                for (int i = 0; i < 4; ++i)
+                    clear[i] = a_from[i] + (a_to[i] - a_from[i]) * t;
+            } else {
+                make_clear(blur_now, clear);
+            }
             d3d.BeginFrame(clear);
             gui.Render();
             d3d.Present(false);
@@ -656,6 +748,7 @@ int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     try { chatbox.Shutdown(); } catch (...) {}
     if (current_srv)  { current_srv->Release();  current_srv  = nullptr; }
     if (previous_srv) { previous_srv->Release(); previous_srv = nullptr; }
+    if (square_srv) { square_srv->Release(); square_srv = nullptr; }
     try { gui.Shutdown(); } catch (...) {}
     Log("gui shutdown ok");
     try { d3d.Destroy(); } catch (...) {}

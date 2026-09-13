@@ -1,356 +1,232 @@
 #include "parser.h"
 #include "../net/winhttp_client.h"
 #include "json.hpp"
-
+#include <Windows.h>
+#include <bcrypt.h>
+#include <algorithm>
 #include <cctype>
-#include <cstdio>
-#include <cstdarg>
-#include <cstring>
-#include <string>
+#include <chrono>
+#include <map>
+#include <regex>
+#include <set>
+#include <sstream>
+#pragma comment(lib,"bcrypt.lib")
 
 namespace bilibili {
-
-static void DiagLog(const char* fmt, ...) {
-    char msg[1024];
-    va_list ap; va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
-    FILE* f = nullptr; fopen_s(&f, "vrc-lyrics.log", "a");
-    if (f) { fputs("[bili] ", f); fputs(msg, f); fputs("\n", f); fclose(f); }
+using Json=nlohmann::json;
+static const char* Headers=
+    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36\r\n"
+    "Referer: https://www.bilibili.com/\r\nAccept: application/json\r\n";
+static std::string Str(const Json& j,const char* key,const std::string& fallback="") {
+    auto p=j.find(key);return p!=j.end() && p->is_string()?p->get<std::string>():fallback;
 }
-
-// 浏览器风格的请求头 —— bilibili API 对 Referer 和 UA 都比较挑剔,
-// 缺一个就会 412 或 -403。
-static const char* kCommonHeaders =
-    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
-    "Referer: https://www.bilibili.com/\r\n"
-    "Accept: application/json, text/plain, */*\r\n"
-    "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n";
-
-// v3.2:不再强制 CDN 节点替换。
-// 原因:VRChat 的可信视频域名白名单里只有 bilibili.com 网页层,
-// upos-*.bilivideo.com / akamaized.net / cloudfront.net 都不在白名单上。
-// 强制替换到任何一个 host 都不能让视频在 VRChat 里"无需 Untrusted URLs 即可播放",
-// 反而失去了 bilibili 自己根据用户位置选最近 CDN 的能力。
-// 直接用 bilibili 给的原始 baseUrl,host 多样化(各种 CDN 都有),命中
-// 用户已放行白名单的概率反而比固定一个节点高一点。
-
-// 从 baseUrl 抽 host(不含 scheme 和 path),给 UI 显示当前 CDN host 用。
-static std::string ExtractHost(const std::string& url) {
-    auto p = url.find("://");
-    if (p == std::string::npos) return {};
-    auto start = p + 3;
-    auto slash = url.find('/', start);
-    return url.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+static int64_t Num(const Json& j,const char* key,int64_t fallback=0) {
+    auto p=j.find(key);return p!=j.end() && p->is_number_integer()?p->get<int64_t>():fallback;
 }
-
-// 从任意字符串里抠 BV 号。BV + 后面 10 位 [a-zA-Z0-9]。
-static std::string ExtractBv(const std::string& s) {
-    for (size_t i = 0; i + 12 <= s.size(); ++i) {
-        if (s[i] == 'B' && s[i+1] == 'V') {
-            bool all_alnum = true;
-            for (size_t k = 2; k < 12; ++k) {
-                unsigned char c = (unsigned char)s[i + k];
-                if (!std::isalnum(c)) { all_alnum = false; break; }
-            }
-            if (all_alnum) return s.substr(i, 12);
-        }
+static std::string Match(const std::string& s,const char* expression,int group=1) {
+    std::smatch m;return std::regex_search(s,m,std::regex(expression))?m[group].str():"";
+}
+static std::string Host(const std::string& s) {
+    std::string h=Match(s,R"(^https?://([^/:?#]+))");
+    std::transform(h.begin(),h.end(),h.begin(),[](unsigned char c){return (char)std::tolower(c);});return h;
+}
+static bool BiliHost(const std::string& url) {
+    const auto h=Host(url);return h=="b23.tv" || h=="bilibili.com" || (h.size()>13 && h.compare(h.size()-13,13,".bilibili.com")==0);
+}
+static bool MediaUrl(const std::string& url) {
+    const auto h=Host(url);
+    for(const char* base:{"bilivideo.com","bilivideo.cn","bilibili.com","akamaized.net","cloudfront.net","mcdn.bilivideo.cn"}) {
+        const std::string b=base;
+        if(h==b || (h.size()>b.size() && h.compare(h.size()-b.size(),b.size(),b)==0 && h[h.size()-b.size()-1]=='.'))return true;
     }
-    return {};
+    return false;
 }
-
-// 从 URL / 任意串里抠分 P 序号。
-// 覆盖: ?p=6 / &p=6 / #page=6 / ?page=6。找不到返回 1(B站默认第1P)。
-// 注意:CDN 直链里的其它 p= 参数我们只在原始 bilibili.com / b23 输入上找,
-// 所以扫整串即可,数字再离谱也会被后面 pages[] 边界钳住。
-static int ExtractPage(const std::string& s) {
-    auto try_key = [&](const char* key) -> int {
-        size_t n = std::strlen(key);
-        size_t pos = 0;
-        while (pos < s.size()) {
-            size_t found = s.find(key, pos);
-            if (found == std::string::npos) return 0;
-            // 前面必须是 '?' / '&' / '#' / 串首,避免误匹配 "spm=..." 之类。
-            if (found > 0) {
-                char prev = s[found - 1];
-                if (prev != '?' && prev != '&' && prev != '#') {
-                    pos = found + n;
-                    continue;
-                }
-            }
-            size_t i = found + n;
-            if (i >= s.size() || !std::isdigit((unsigned char)s[i])) {
-                pos = found + n;
-                continue;
-            }
-            int v = 0;
-            while (i < s.size() && std::isdigit((unsigned char)s[i])) {
-                v = v * 10 + (s[i] - '0');
-                if (v > 9999) break; // 防溢出;B站分P 实际远小于此
-                ++i;
-            }
-            if (v > 0) return v;
-            pos = found + n;
-        }
-        return 0;
-    };
-    int p = try_key("p=");
-    if (p > 0) return p;
-    p = try_key("page=");
-    if (p > 0) return p;
-    return 1;
+static int Positive(const std::string& s) {
+    if(s.empty() || s.size()>9)return 0;
+    try {return std::stoi(s);}catch(...){return 0;}
 }
-
-// b23.tv/xxx → 完整 bilibili.com URL。利用 net::ResolveRedirect 拿 Location 头,
-// 不下载目标页面 HTML(VS 那边以前下载整页太慢)。
-static std::string ResolveShortLink(const std::string& url) {
-    std::string normalized = url;
-    if (normalized.rfind("http://", 0) != 0 && normalized.rfind("https://", 0) != 0) {
-        normalized = "https://" + normalized;
+std::string QualityLabel(int q,bool live) {
+    if(live){switch(q){case 80:return "流畅";case 150:return "高清";case 250:return "超清";case 400:return "蓝光";case 10000:return "原画";case 15000:return "2K";case 20000:return "4K";case 30000:return "杜比";}}
+    else {switch(q){case 16:return "360P";case 32:return "480P";case 64:return "720P";case 74:return "720P60";case 80:return "1080P";case 112:return "1080P 高码率";case 116:return "1080P60";case 120:return "4K";case 125:return "HDR";case 126:return "杜比视界";case 127:return "8K";}}
+    return q==0?"自动":std::to_string(q);
+}
+static void Fail(ParseResult& r,ErrorCode e,const std::string& message){r.ok=false;r.error=e;r.message=message;}
+static bool GetJson(const std::string& url,const Transport& t,Json& j,ParseResult& r,bool check_code=true) {
+    std::string body;int status=0;
+    const bool ok=t.get?t.get(url,Headers,body,status):net::HttpGet(url,Headers,body,status);
+    r.http_status=status;
+    if(!ok){Fail(r,ErrorCode::Network,"网络请求失败，HTTP "+std::to_string(status)+"；请检查网络或稍后重试。");return false;}
+    j=Json::parse(body,nullptr,false);
+    if(j.is_discarded() || !j.is_object()){Fail(r,ErrorCode::JsonInvalid,"接口没有返回有效 JSON。");return false;}
+    r.api_code=(int)Num(j,"code",-1);
+    if(check_code && r.api_code!=0){
+        const bool restricted=r.api_code==-101 || r.api_code==-403 || r.api_code==-10403 || r.api_code==-352 || r.api_code==-401;
+        Fail(r,restricted?ErrorCode::Restricted:ErrorCode::Api,
+            "Bilibili "+std::to_string(r.api_code)+"："+Str(j,"message",Str(j,"msg","请求被拒绝")));
+        return false;
     }
-    std::string location;
-    int status = 0;
-    bool ok = net::ResolveRedirect(normalized, kCommonHeaders, location, status);
-    DiagLog("shortlink %s -> status=%d loc=%s",
-            normalized.c_str(), status, location.c_str());
-    if (ok && status >= 300 && status < 400 && !location.empty()) return location;
-    return {};
+    return true;
 }
-
-// 输入预处理:抠 BV + 分P。bvid 空串表示拿不到。
-// 短链会先 resolve 再抠(短链本身没有 BV / p,全在 Location 里)。
-struct NormalizedInput {
-    std::string bvid;
-    int         page = 1;
-};
-
-static NormalizedInput NormalizeInput(const std::string& input_in) {
-    NormalizedInput out;
-    // 去掉首尾空白,VRChat 玩家从聊天框复制经常带空格/换行。
-    std::string input = input_in;
-    while (!input.empty() && (input.front() == ' ' || input.front() == '\t' ||
-                              input.front() == '\r' || input.front() == '\n'))
-        input.erase(input.begin());
-    while (!input.empty() && (input.back() == ' ' || input.back() == '\t' ||
-                              input.back() == '\r' || input.back() == '\n'))
-        input.pop_back();
-    if (input.empty()) return out;
-
-    // 先从原串抠 BV / p(完整 bilibili.com 链接、裸 BV、带 ?p= 的任意串)。
-    out.bvid = ExtractBv(input);
-    out.page = ExtractPage(input);
-
-    // 短链:走重定向。Location 上既有 BV 也常带 p=。
-    if (out.bvid.empty() || input.find("b23.tv/") != std::string::npos) {
-        if (input.find("b23.tv/") != std::string::npos) {
-            std::string resolved = ResolveShortLink(input);
-            if (!resolved.empty()) {
-                if (out.bvid.empty()) out.bvid = ExtractBv(resolved);
-                // 原串没写 p= 时,用重定向目标上的;原串写了就以用户为准。
-                if (ExtractPage(input) == 1) {
-                    int rp = ExtractPage(resolved);
-                    if (rp > 1) out.page = rp;
-                }
-            }
-        }
-    }
-    if (out.page < 1) out.page = 1;
-    return out;
+static void AddQuality(ParseResult& r,int q,const std::string& label) {
+    if(q<=0)return;
+    for(auto& old:r.qualities)if(old.id==q)return;
+    r.qualities.push_back({q,label.empty()?QualityLabel(q,r.live):label});
 }
-
-ParseResult Parse(const std::string& input) {
-    ParseResult r;
-
-    NormalizedInput ni = NormalizeInput(input);
-    if (ni.bvid.empty()) {
-        r.error = ErrorCode::NoBv;
-        DiagLog("parse: no BV in input='%s'", input.c_str());
-        return r;
-    }
-    r.bvid = ni.bvid;
-    r.page = ni.page;
-    DiagLog("parse: bv=%s page=%d", ni.bvid.c_str(), ni.page);
-
-    // Step 1: web-interface/view → 按 pages[p-1] 取 cid + 标题
-    // data.cid 永远是 P1 的 cid,多P视频必须走 data.pages[]。
-    int64_t cid = 0;
-    {
-        std::string url = "https://api.bilibili.com/x/web-interface/view?bvid=" + ni.bvid;
-        std::string body;
-        int status = 0;
-        if (!net::HttpGet(url, kCommonHeaders, body, status)) {
-            DiagLog("view http fail status=%d size=%zu", status, body.size());
-            r.error = ErrorCode::Network;
-            return r;
-        }
-        try {
-            auto j = nlohmann::json::parse(body, nullptr, false);
-            if (j.is_discarded()) { r.error = ErrorCode::JsonInvalid; return r; }
-            int code = j.value("code", -1);
-            if (code != 0) {
-                DiagLog("view api code=%d", code);
-                r.error = ErrorCode::Api;
-                return r;
-            }
-            const auto& data = j["data"];
-            std::string main_title;
-            if (data.contains("title") && data["title"].is_string())
-                main_title = data["title"].get<std::string>();
-
-            // pages: [{cid, page, part, duration, ...}, ...]
-            // page 字段是 1-based 分P号;数组下标通常 page-1,但保险起见按 page 字段匹配。
-            int pages_count = 0;
-            if (data.contains("pages") && data["pages"].is_array()) {
-                const auto& pages = data["pages"];
-                pages_count = (int)pages.size();
-                int want = ni.page;
-                if (want < 1) want = 1;
-                if (pages_count > 0 && want > pages_count) {
-                    DiagLog("page %d out of range (max %d), clamp to last", want, pages_count);
-                    want = pages_count;
-                }
-                r.page = want;
-
-                // 1) 按 page 字段精确匹配
-                for (const auto& pg : pages) {
-                    int pg_no = pg.value("page", 0);
-                    if (pg_no == want) {
-                        if (pg.contains("cid") && pg["cid"].is_number_integer())
-                            cid = pg["cid"].get<int64_t>();
-                        std::string part;
-                        if (pg.contains("part") && pg["part"].is_string())
-                            part = pg["part"].get<std::string>();
-                        if (pages_count > 1 && !part.empty())
-                            r.title = main_title + " - P" + std::to_string(want) + " " + part;
-                        else if (pages_count > 1)
-                            r.title = main_title + " - P" + std::to_string(want);
-                        else
-                            r.title = main_title;
-                        break;
+static void AddStream(ParseResult& r,std::string url,const std::string& label,const std::string& format) {
+    if(url.rfind("//",0)==0)url="https:"+url;
+    if(!MediaUrl(url) || url.size()>8192)return;
+    for(const auto& s:r.streams)if(s.url==url)return;
+    r.streams.push_back({url,label,format});
+}
+static std::string Md5(const std::string& value) {
+    BCRYPT_ALG_HANDLE algorithm=nullptr;unsigned char bytes[16];
+    if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_MD5_ALGORITHM,nullptr,0)<0)return {};
+    auto status=BCryptHash(algorithm,nullptr,0,(PUCHAR)value.data(),(ULONG)value.size(),bytes,16);
+    BCryptCloseAlgorithmProvider(algorithm,0);if(status<0)return {};
+    const char* digits="0123456789abcdef";std::string result;
+    for(auto b:bytes){result+=digits[b>>4];result+=digits[b&15];}return result;
+}
+static std::string WbiQuery(const std::string& bvid,int64_t cid,int quality,const Transport& t) {
+    Json nav;ParseResult error;
+    if(!GetJson("https://api.bilibili.com/x/web-interface/nav",t,nav,error,false))return {};
+    if(!nav.contains("data") || !nav["data"].is_object())return {};
+    const Json img=nav["data"].value("wbi_img",Json::object());
+    const std::string keys=Match(Str(img,"img_url"),R"(/([a-zA-Z0-9]+)\.[a-z]+)")+
+        Match(Str(img,"sub_url"),R"(/([a-zA-Z0-9]+)\.[a-z]+)");
+    if(keys.size()!=64)return {};
+    constexpr int indices[]={46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13};
+    std::string mix;for(int i:indices)mix+=keys[i];
+    const auto stamp=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    // All parameter values here are validated alphanumeric/numeric. Sorted as WBI requires.
+    const std::string query="bvid="+bvid+"&cid="+std::to_string(cid)+"&fnval=1&platform=html5&qn="+std::to_string(quality)+"&wts="+std::to_string(stamp);
+    return query+"&w_rid="+Md5(query+mix);
+}
+static void Finish(ParseResult& r,const ParseOptions& options) {
+    if(r.streams.empty()){Fail(r,ErrorCode::NoStream,"没有返回可用的完整视频地址。");return;}
+    r.url=r.streams.front().url;r.format=r.streams.front().format;r.node=Host(r.url);
+    r.quality=QualityLabel(r.actual_quality,r.live);
+    r.ok=true;r.error=ErrorCode::None;r.api_code=0;r.message.clear();
+    if(options.quality && r.actual_quality!=options.quality)
+        r.warning+="所选 "+QualityLabel(options.quality,r.live)+" 未返回，实际为 "+r.quality+"；更高清晰度可能需要登录或会员。";
+}
+static ParseResult ParseLive(const std::string& room,const ParseOptions& options,const Transport& t) {
+    ParseResult r;r.live=true;r.page=0;r.requested_quality=options.quality;r.source_url="https://live.bilibili.com/"+room;
+    Json j;
+    if(!GetJson("https://api.live.bilibili.com/room/v1/Room/room_init?id="+room,t,j,r))return r;
+    const auto data=j.value("data",Json::object());
+    const auto id=Num(data,"room_id");
+    if(data.value("encrypted",false) || data.value("is_locked",false)){Fail(r,ErrorCode::Restricted,"直播间有访问限制，无法解析。");return r;}
+    if(Num(data,"live_status")!=1){Fail(r,ErrorCode::Offline,"该直播间尚未开播或已下播。");return r;}
+    if(id<=0){Fail(r,ErrorCode::Api,"直播间编号无效。");return r;}
+    r.title="Bilibili 直播 · "+std::to_string(id);
+    const int q=options.quality?options.quality:10000;
+    const std::string api="https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id="+std::to_string(id)+
+        "&protocol=0,1&format=0,1,2&codec=0&qn="+std::to_string(q)+"&platform=web&ptype=8";
+    if(!GetJson(api,t,j,r))return r;
+    const Json info=j.value("data",Json::object());
+    if(Num(info,"live_status")!=1){Fail(r,ErrorCode::Offline,"该直播间已下播。");return r;}
+    const Json play=info.value("playurl_info",Json::object()).value("playurl",Json::object());
+    std::map<int,std::string> names;
+    for(const auto& a:play.value("g_qn_desc",Json::array()))names[(int)Num(a,"qn")]=Str(a,"desc");
+    // Prefer AVC HLS/TS; FLV is a visible alternative, not a silently substituted codec.
+    for(const char* want:{"ts","flv","fmp4"})
+        for(const auto& protocol:play.value("stream",Json::array()))
+            for(const auto& format:protocol.value("format",Json::array())){
+                if(Str(format,"format_name")!=want)continue;
+                for(const auto& codec:format.value("codec",Json::array())){
+                    if(Str(codec,"codec_name")!="avc")continue;
+                    for(const auto& a:codec.value("accept_qn",Json::array()))if(a.is_number_integer())AddQuality(r,a.get<int>(),names[a.get<int>()]);
+                    if(!r.actual_quality)r.actual_quality=(int)Num(codec,"current_qn");
+                    int backup=0;
+                    for(const auto& u:codec.value("url_info",Json::array())){
+                        std::string name=std::string(want)=="ts"?"HLS":std::string(want)=="flv"?"FLV":"HLS fMP4";
+                        AddStream(r,Str(u,"host")+Str(codec,"base_url")+Str(u,"extra"),name+(backup++?" · 备用":" · 主线路"),name);
                     }
                 }
-                // 2) 回退:按数组下标 want-1
-                if (cid == 0 && want >= 1 && want <= pages_count) {
-                    const auto& pg = pages[want - 1];
-                    if (pg.contains("cid") && pg["cid"].is_number_integer())
-                        cid = pg["cid"].get<int64_t>();
-                    std::string part;
-                    if (pg.contains("part") && pg["part"].is_string())
-                        part = pg["part"].get<std::string>();
-                    if (pages_count > 1 && !part.empty())
-                        r.title = main_title + " - P" + std::to_string(want) + " " + part;
-                    else if (pages_count > 1)
-                        r.title = main_title + " - P" + std::to_string(want);
-                    else
-                        r.title = main_title;
-                }
             }
-
-            // 单P / pages 缺失:退回 data.cid(即 P1)
-            if (cid == 0) {
-                if (data.contains("cid") && data["cid"].is_number_integer())
-                    cid = data["cid"].get<int64_t>();
-                r.title = main_title;
-                r.page  = 1;
-            }
-            DiagLog("view ok pages=%d picked page=%d cid=%lld title=%s",
-                    pages_count, r.page, (long long)cid, r.title.c_str());
-        } catch (...) {
-            r.error = ErrorCode::JsonInvalid;
-            return r;
-        }
-        if (cid == 0) { r.error = ErrorCode::Api; return r; }
-    }
-
-    // Step 2: player/playurl → durl (单文件 MP4 / FLV)
-    //
-    // v3.3 起改用 fnval=1(MP4 单文件)替代 fnval=16(DASH)。
-    // 原因:DASH 给的 baseUrl 扩展名是 .m4s(fragmented MP4 segment),VRChat 的
-    // AVPro / Unity VideoPlayer 看到 .m4s 直接报"不支持的链接"。MP4 durl 拿到的
-    // URL 是 .mp4 / .flv 单文件,音视频合在一起,所有播放器都吃。代价:画质上限
-    // 1080P(qn=80),没法上 4K/HDR/8K —— 但 VRChat 视频墙根本不需要 4K。
-    //
-    // qn=80 直接要 1080P,API 会自动降到该视频实际可用的最高质量。platform=html5
-    // 仍然带上,用来绕开网页端防盗链限制(给的 URL 不需要带 Referer 也能拉)。
-    {
-        char url_buf[256];
-        std::snprintf(url_buf, sizeof(url_buf),
-            "https://api.bilibili.com/x/player/playurl?"
-            "bvid=%s&cid=%lld&qn=80&fnval=1&platform=html5",
-            r.bvid.c_str(), (long long)cid);
-
-        std::string body;
-        int status = 0;
-        if (!net::HttpGet(url_buf, kCommonHeaders, body, status)) {
-            DiagLog("playurl http fail status=%d size=%zu", status, body.size());
-            r.error = ErrorCode::Network;
-            return r;
-        }
-        try {
-            auto j = nlohmann::json::parse(body, nullptr, false);
-            if (j.is_discarded()) { r.error = ErrorCode::JsonInvalid; return r; }
-            int code = j.value("code", -1);
-            if (code != 0) {
-                DiagLog("playurl api code=%d", code);
-                r.error = ErrorCode::Api;
-                return r;
-            }
-            const auto& data = j["data"];
-
-            // 主路径:durl 单文件。data.quality 是实际返回的 qn(可能比请求的低)。
-            if (data.contains("durl") && data["durl"].is_array() &&
-                !data["durl"].empty() &&
-                data["durl"][0].contains("url") &&
-                data["durl"][0]["url"].is_string()) {
-                r.url     = data["durl"][0]["url"].get<std::string>();
-                int qn    = data.value("quality", 0);
-                r.quality = (qn == 80 ? "1080P" : qn == 64 ? "720P" :
-                             qn == 32 ? "480P"  : qn == 16 ? "360P" : "AUTO");
-                // format 看 URL 后缀(去掉 query string 再判),.mp4 / .flv 都常见。
-                r.format  = "MP4";
-                {
-                    std::string p = r.url;
-                    auto qpos = p.find('?');
-                    if (qpos != std::string::npos) p.resize(qpos);
-                    if (p.size() >= 4 && p.compare(p.size()-4, 4, ".flv") == 0) r.format = "FLV";
-                }
-                r.node    = ExtractHost(r.url);
-                r.ok      = true;
-                DiagLog("durl picked qn=%d fmt=%s host=%s",
-                        qn, r.format.c_str(), r.node.c_str());
-                return r;
-            }
-
-            // 兜底:个别新视频可能只给 DASH(理论上 fnval=1 不会触发这里,但 API
-            // 偶尔有边缘 case)。给出来用户能复制,只是 VRChat 大概率不认 .m4s。
-            if (data.contains("dash") && data["dash"].is_object() &&
-                data["dash"].contains("video") && data["dash"]["video"].is_array() &&
-                !data["dash"]["video"].empty()) {
-                const auto& videos = data["dash"]["video"];
-                if (videos[0].contains("baseUrl") && videos[0]["baseUrl"].is_string()) {
-                    r.url     = videos[0]["baseUrl"].get<std::string>();
-                    r.format  = "DASH";
-                    int qn    = videos[0].value("id", 0);
-                    r.quality = (qn == 120 ? "4K" : qn == 116 ? "1080P60" :
-                                 qn == 112 ? "1440P" : qn == 80  ? "1080P" :
-                                 qn == 64  ? "720P"  : qn == 32  ? "480P"  :
-                                 qn == 16  ? "360P"  : "AUTO");
-                    r.node    = ExtractHost(r.url);
-                    r.ok      = true;
-                    DiagLog("dash fallback qn=%d host=%s", qn, r.node.c_str());
-                    return r;
-                }
-            }
-
-            r.error = ErrorCode::NoStream;
-            DiagLog("no durl & no dash in playurl response");
-            return r;
-        } catch (...) {
-            r.error = ErrorCode::JsonInvalid;
-            return r;
-        }
-    }
+    r.warning="直播地址会过期；若播放失败可切换线路或重新解析。播放器需要支持 HLS/FLV。";
+    Finish(r,options);return r;
 }
-
+ParseResult Parse(const std::string& raw,const ParseOptions& options,const Transport& t) {
+    ParseResult r;
+    r.requested_quality=options.quality;
+    try {
+        if(raw.size()>8192){Fail(r,ErrorCode::NoBv,"输入过长。");return r;}
+        std::string input=raw;
+        const int input_page=Positive(Match(input,R"((?:[?&#]|^)p(?:age)?=(\d+))"));
+        std::string url=Match(input,R"((https?://[A-Za-z0-9./_?=&%+#:~-]+))");
+        if(url.empty()){
+            auto hostpos=input.find("b23.tv/");
+            if(hostpos!=std::string::npos && (hostpos==0 || !std::isalnum((unsigned char)input[hostpos-1])))
+                url="https://"+Match(input.substr(hostpos),R"((b23\.tv/[A-Za-z0-9/?=&%+#_-]+))");
+            if(url.empty() && input.rfind("live.bilibili.com/",0)==0)url="https://"+input;
+        }
+        if(!url.empty() && !BiliHost(url)){Fail(r,ErrorCode::NoBv,"仅支持 bilibili.com 视频或直播链接、BV/AV 号和 b23.tv 短链。");return r;}
+        for(int hop=0;Host(url)=="b23.tv" && hop<5;++hop){
+            std::string target;int status=0;
+            const bool ok=t.redirect?t.redirect(url,Headers,target,status):net::ResolveRedirect(url,Headers,target,status);
+            if(target.rfind("//",0)==0)target="https:"+target;
+            if(!ok || status<300 || status>=400 || !BiliHost(target)){Fail(r,ErrorCode::ShortlinkFailed,"短链跳转失败或目标不是 Bilibili。");return r;}
+            url=target;
+        }
+        if(Host(url)=="b23.tv"){Fail(r,ErrorCode::ShortlinkFailed,"短链跳转次数过多。");return r;}
+        if(!url.empty())input=url;
+        if(Host(url)=="live.bilibili.com"){
+            auto room=Match(url,R"(live\.bilibili\.com/(?:blanc/)?([0-9]{1,12})(?:[/?#]|$))");
+            if(room.empty()){Fail(r,ErrorCode::NoBv,"请粘贴完整的直播间链接。");return r;}
+            return ParseLive(room,options,t);
+        }
+        r.bvid=Match(input,R"((BV[A-Za-z0-9]{10})(?:[^A-Za-z0-9]|$))");
+        const std::string aid=Match(input,R"((?:^|[/\s])av([0-9]{1,12})(?:[/?#\s]|$))");
+        if(r.bvid.empty() && aid.empty()){Fail(r,ErrorCode::NoBv,"未找到 BV/AV 号；请粘贴视频或直播间链接。");return r;}
+        Json j;
+        if(!GetJson("https://api.bilibili.com/x/web-interface/view?"+(r.bvid.empty()?"aid="+aid:"bvid="+r.bvid),t,j,r))return r;
+        const Json data=j.value("data",Json::object());
+        r.bvid=Str(data,"bvid",r.bvid);r.title=Str(data,"title");
+        for(const auto& p:data.value("pages",Json::array())){
+            if(r.pages.size()>=2000)break;
+            const int number=(int)Num(p,"page");const auto cid=Num(p,"cid");
+            if(number>0 && cid>0)r.pages.push_back({number,cid,Str(p,"part"),(int)Num(p,"duration")});
+        }
+        if(r.pages.empty() && Num(data,"cid")>0)r.pages.push_back({1,Num(data,"cid"),r.title,0});
+        r.page=options.page>0?options.page:input_page>0?input_page:std::max(1,Positive(Match(input,R"((?:[?&#]|^)p(?:age)?=(\d+))")));
+        const auto selected=std::find_if(r.pages.begin(),r.pages.end(),[&](const Page& p){return p.number==r.page;});
+        if(selected==r.pages.end()){Fail(r,ErrorCode::InvalidPage,"所选分集不存在，请从分集列表重新选择。");return r;}
+        if(r.pages.size()>1)r.title+=" · P"+std::to_string(r.page)+" "+selected->title;
+        r.source_url="https://www.bilibili.com/video/"+r.bvid+"/?p="+std::to_string(r.page);
+        const int q=options.quality?options.quality:80;
+        std::string endpoint="https://api.bilibili.com/x/player/playurl?bvid="+r.bvid+"&cid="+std::to_string(selected->cid)+
+            "&qn="+std::to_string(q)+"&fnval=1&platform=html5";
+        if(!GetJson(endpoint,t,j,r)){
+            // Deprecated-parameter errors may use the signed endpoint. Do not
+            // rotate endpoints/proxies to defeat login, risk or region restrictions.
+            if(r.error!=ErrorCode::Api || (r.api_code!=-400 && r.api_code!=-404))return r;
+            const auto query=WbiQuery(r.bvid,selected->cid,q,t);
+            if(query.empty() || !GetJson("https://api.bilibili.com/x/player/wbi/playurl?"+query,t,j,r))return r;
+        }
+        const Json play=j.value("data",Json::object());
+        r.actual_quality=(int)Num(play,"quality");
+        const Json accepted=play.value("accept_quality",Json::array()), descriptions=play.value("accept_description",Json::array());
+        for(size_t i=0;i<accepted.size();++i)if(accepted[i].is_number_integer())
+            AddQuality(r,accepted[i].get<int>(),i<descriptions.size()&&descriptions[i].is_string()?descriptions[i].get<std::string>():"");
+        AddQuality(r,r.actual_quality,"");
+        const Json durl=play.value("durl",Json::array());
+        int segment=0;
+        for(const auto& d:durl){
+            ++segment;std::string u=Str(d,"url");
+            const std::string path=u.substr(0,u.find('?'));
+            const std::string format=path.find(".flv")!=std::string::npos?"FLV":"MP4";
+            std::string label=durl.size()>1?"视频段 "+std::to_string(segment):"主线路";
+            AddStream(r,u,label,format);
+            int backup=0;
+            for(const auto& b:d.value("backup_url",Json::array()))if(b.is_string())AddStream(r,b.get<std::string>(),label+" · 备用 "+std::to_string(++backup),format);
+        }
+        if(durl.size()>1)r.warning="此视频由 "+std::to_string(durl.size())+" 段组成；下方链接每次只包含所选视频段，不能当成完整合集。";
+        if(r.streams.empty() && play.contains("dash")){
+            Fail(r,ErrorCode::SeparateStreams,"平台仅返回音视频分离流，无法作为 VRChat 的单一完整链接；请降低清晰度或使用原视频页面。");return r;
+        }
+        Finish(r,options);
+    } catch(const std::exception&) {Fail(r,ErrorCode::JsonInvalid,"接口字段发生变化或数据格式错误，请稍后重试。");}
+    return r;
+}
 }

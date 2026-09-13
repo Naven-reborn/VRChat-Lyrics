@@ -1,4 +1,5 @@
 #include "style.h"
+#include "ui_motion.h"
 #include "MuseoSans700.h"
 #include "MuseoSans900.h"
 #include <Windows.h>
@@ -11,11 +12,14 @@ ImFont* font_caption = nullptr;
 ImFont* font_medium  = nullptr;
 ImFont* font_title   = nullptr;
 ImFont* font_logo    = nullptr;
+ImFont* font_lyrics  = nullptr;
 float   ui_scale     = 1.0f;
+bool interface_motion_enabled = true;
 
 namespace col {
     ImVec4 bg_root, bg_sidebar, bg_content, bg_card, bg_input, bg_titlebar, bg_hover;
     ImVec4 stroke;
+    ImVec4 bg_popup, popup_border, popup_hover;
     ImVec4 text, text_dim, text_caption;
     ImVec4 accent, accent_dim;
     ImVec4 dot_off, dot_on;
@@ -131,7 +135,7 @@ static void ApplyImGuiStyleColors() {
     c[ImGuiCol_ChildBg]           = col::bg_content;
     // 亮色弹层用 input 底,避免跟白卡糊在一起;暗色仍用 card。
     const bool lightish = (col::bg_card.x + col::bg_card.y + col::bg_card.z) > 2.0f;
-    c[ImGuiCol_PopupBg]           = lightish ? col::bg_input : col::bg_card;
+    c[ImGuiCol_PopupBg]           = col::bg_popup;
     c[ImGuiCol_Border]            = col::stroke;
     c[ImGuiCol_FrameBg]           = col::bg_input;
     c[ImGuiCol_FrameBgHovered]    = col::bg_hover;
@@ -153,8 +157,10 @@ static void ApplyImGuiStyleColors() {
     c[ImGuiCol_ResizeGrip]        = ImVec4(0, 0, 0, 0);
 }
 
-void ApplyTheme(Theme t) {
+void ApplyTheme(Theme t, int blur_opacity) {
     using col::from_rgba;
+    if (blur_opacity < 0) blur_opacity = 0;
+    if (blur_opacity > 100) blur_opacity = 100;
     if (t == Theme::Light) {
         // 亮色主题重做(v3.3):
         // 旧版几乎全是 240–255 的冷灰白,卡片/输入/背景糊成一片,看起来像"白茫茫"。
@@ -169,13 +175,17 @@ void ApplyTheme(Theme t) {
         //   hover         #E4EAF2  可交互反馈
         //   stroke        #D5DCE6  可见但不抢
         col::bg_root      = from_rgba(240.f, 242.f, 245.f, 255.f);
-        col::bg_sidebar   = from_rgba(232.f, 236.f, 241.f, 255.f);
+        // titlebar + sidebar same chrome (VRC LYRICS strip == Lyrics/App tabs)
+        col::bg_titlebar  = from_rgba(232.f, 236.f, 241.f, 255.f);
+        col::bg_sidebar   = col::bg_titlebar;
         col::bg_content   = from_rgba(240.f, 242.f, 245.f, 255.f);
         col::bg_card      = from_rgba(255.f, 255.f, 255.f, 255.f);
         col::bg_input     = from_rgba(244.f, 246.f, 249.f, 255.f);
-        col::bg_titlebar  = from_rgba(232.f, 236.f, 241.f, 255.f);
         col::bg_hover     = from_rgba(228.f, 234.f, 242.f, 255.f);
         col::stroke       = from_rgba(213.f, 220.f, 230.f, 255.f);
+        col::bg_popup     = from_rgba(255.f, 255.f, 255.f, 255.f);
+        col::popup_border = from_rgba(204.f, 214.f, 226.f, 255.f);
+        col::popup_hover  = from_rgba(228.f, 237.f, 247.f, 255.f);
 
         // 文字对比度拉高:主字近黑,次级灰,caption 再淡 —— 亮底上 dim 不能太浅。
         col::text         = from_rgba( 22.f,  28.f,  38.f, 255.f);
@@ -188,16 +198,55 @@ void ApplyTheme(Theme t) {
 
         col::dot_off      = from_rgba(160.f, 170.f, 184.f, 255.f);
         col::dot_on       = from_rgba(255.f, 255.f, 255.f, 255.f);
+    } else if (t == Theme::Blur) {
+        // Win11 Acrylic. Panel alpha scales with blur_opacity (0..100).
+        //   0   → almost clear (Acrylic shows through)
+        //   55  → default frost
+        //   100 → nearly solid dark board
+        // clear tint (main) also scales — see BlurClearAlpha().
+        const float u = blur_opacity / 100.f;          // 0..1 user
+        // panel alpha curve: keep a floor so UI never fully vanishes, soft top
+        auto a = [u](float lo, float hi) -> float {
+            return lo + (hi - lo) * u;                 // linear in user space
+        };
+        // RGB stays cool dark; only alpha moves
+        col::bg_root      = from_rgba( 18.f,  20.f,  28.f, a( 40.f, 230.f));
+        // chrome: title (VRC LYRICS) and sidebar tabs share one color/alpha
+        col::bg_titlebar  = from_rgba( 14.f,  16.f,  22.f, a( 55.f, 245.f));
+        col::bg_sidebar   = col::bg_titlebar;
+        col::bg_content   = from_rgba( 18.f,  20.f,  28.f, a( 35.f, 225.f));
+        col::bg_card      = from_rgba( 30.f,  32.f,  40.f, a( 90.f, 250.f));
+        col::bg_input     = from_rgba( 24.f,  26.f,  34.f, a(100.f, 250.f));
+        col::bg_hover     = from_rgba(255.f, 255.f, 255.f, a( 20.f,  48.f));
+        col::stroke       = from_rgba(255.f, 255.f, 255.f, a( 28.f,  60.f));
+        // Glass has its own readable material; do not flatten it to the dark
+        // input surface. This is a translucent overlay, not a separate OS blur.
+        col::bg_popup     = from_rgba( 43.f,  48.f,  59.f, a(248.f, 254.f));
+        col::popup_border = from_rgba(210.f, 227.f, 244.f,  66.f);
+        col::popup_hover  = from_rgba(200.f, 224.f, 244.f,  30.f);
+
+        col::text         = from_rgba(245.f, 246.f, 250.f, 255.f);
+        col::text_dim     = from_rgba(168.f, 174.f, 188.f, 255.f);
+        col::text_caption = from_rgba(120.f, 126.f, 142.f, 255.f);
+
+        col::accent       = from_rgba(121.f, 200.f, 235.f, 255.f);
+        col::accent_dim   = from_rgba( 70.f, 120.f, 150.f, 220.f);
+
+        col::dot_off      = from_rgba(130.f, 140.f, 160.f, 220.f);
+        col::dot_on       = from_rgba(255.f, 255.f, 255.f, 255.f);
     } else {
-        // 暖中性 off-black,不是纯 #000;input 比 root 略亮一档,card 再亮一档。
+        // Dark: 暖中性 off-black,不是纯 #000;input 比 root 略亮一档,card 再亮一档。
         col::bg_root      = from_rgba( 14.f,  14.f,  14.f, 255.f);
-        col::bg_sidebar   = from_rgba( 10.f,  10.f,  10.f, 255.f);
+        col::bg_titlebar  = from_rgba( 10.f,  10.f,  10.f, 255.f);
+        col::bg_sidebar   = col::bg_titlebar;
         col::bg_content   = from_rgba( 14.f,  14.f,  14.f, 255.f);
         col::bg_card      = from_rgba( 22.f,  22.f,  22.f, 255.f);
         col::bg_input     = from_rgba( 18.f,  18.f,  18.f, 255.f);
-        col::bg_titlebar  = from_rgba( 10.f,  10.f,  10.f, 255.f);
         col::bg_hover     = from_rgba( 32.f,  32.f,  32.f, 255.f);
         col::stroke       = from_rgba( 45.f,  45.f,  45.f, 255.f);
+        col::bg_popup     = from_rgba( 22.f,  22.f,  22.f, 255.f);
+        col::popup_border = from_rgba( 58.f,  58.f,  58.f, 255.f);
+        col::popup_hover  = from_rgba( 40.f,  40.f,  40.f, 255.f);
 
         col::text         = from_rgba(242.f, 242.f, 240.f, 255.f);
         col::text_dim     = from_rgba(140.f, 140.f, 138.f, 255.f);
@@ -212,13 +261,15 @@ void ApplyTheme(Theme t) {
     ApplyImGuiStyleColors();
 }
 
-// 主题切换 —— 300ms ease-out cubic 把整个调色板 lerp 过去。
+// Theme switching: one 240ms palette transition, continuous on retarget.
 namespace {
-    constexpr int kPalN = 15;
+    constexpr int kPalN = 18;
     struct Snap { ImVec4 c[kPalN]; };
 
+    int g_blur_opacity = 55;
+
     Snap CaptureFor(Theme t) {
-        ApplyTheme(t);   // sets col::* to that theme
+        ApplyTheme(t, g_blur_opacity);   // sets col::* to that theme
         Snap s;
         s.c[0]  = col::bg_root;    s.c[1]  = col::bg_sidebar;
         s.c[2]  = col::bg_content; s.c[3]  = col::bg_card;
@@ -228,6 +279,7 @@ namespace {
         s.c[10] = col::text_caption;
         s.c[11] = col::accent;     s.c[12] = col::accent_dim;
         s.c[13] = col::dot_off;    s.c[14] = col::dot_on;
+        s.c[15] = col::bg_popup; s.c[16] = col::popup_border; s.c[17] = col::popup_hover;
         return s;
     }
 
@@ -240,6 +292,7 @@ namespace {
         col::text_caption = s.c[10];
         col::accent       = s.c[11]; col::accent_dim = s.c[12];
         col::dot_off      = s.c[13]; col::dot_on     = s.c[14];
+        col::bg_popup=s.c[15];col::popup_border=s.c[16];col::popup_hover=s.c[17];
         ApplyImGuiStyleColors();
     }
 
@@ -254,8 +307,31 @@ namespace {
     float g_trans_t = 1.f;
 }
 
-void BeginThemeTransition(Theme from, Theme to) {
-    g_from = CaptureFor(from);
+void SnapTheme(Theme t, int blur_opacity) {
+    g_blur_opacity = blur_opacity;
+    if (g_blur_opacity < 0) g_blur_opacity = 0;
+    if (g_blur_opacity > 100) g_blur_opacity = 100;
+    ApplyTheme(t, g_blur_opacity);
+    g_trans_t = 1.f; // cancel in-flight lerp
+}
+
+void BeginThemeTransition(Theme from, Theme to, int blur_opacity) {
+    g_blur_opacity = blur_opacity;
+    if (g_blur_opacity < 0) g_blur_opacity = 0;
+    if (g_blur_opacity > 100) g_blur_opacity = 100;
+    if (from == to || !interface_motion_enabled) {
+        SnapTheme(to, g_blur_opacity);
+        return;
+    }
+    // composition path is fixed, so Blur transitions can safely lerp alpha.
+    // Acrylic on/off is handled by main; colors ease over 240ms.
+    // Rapid theme clicks continue from the current palette, not the old endpoint.
+    if (g_trans_t >= 1.f) {
+        g_from = CaptureFor(from);
+    } else {
+        const float visible_t=motion::Ease(g_trans_t);
+        for(int i=0;i<kPalN;++i) g_from.c[i]=LerpVec(g_from.c[i],g_to.c[i],visible_t);
+    }
     g_to   = CaptureFor(to);
     g_trans_t = 0.f;
     RestoreFromSnap(g_from);
@@ -263,13 +339,38 @@ void BeginThemeTransition(Theme from, Theme to) {
 
 void TickThemeTransition(float dt) {
     if (g_trans_t >= 1.f) return;
-    g_trans_t += dt / 0.30f;
+    g_trans_t += std::clamp(dt,0.f,.25f) / 0.24f;
+    if (!interface_motion_enabled) g_trans_t=1.f;
     if (g_trans_t > 1.f) g_trans_t = 1.f;
-    float u = 1.f - g_trans_t;
-    float t = 1.f - u * u * u;  // ease-out cubic
+    float t = motion::Ease(g_trans_t);
     Snap cur;
     for (int i = 0; i < kPalN; ++i) cur.c[i] = LerpVec(g_from.c[i], g_to.c[i], t);
     RestoreFromSnap(cur);
+}
+
+bool ThemeTransitionActive() {
+    return g_trans_t < 1.f;
+}
+
+float ThemeTransitionT() {
+    // 跟 TickThemeTransition 同一条 ease-out cubic,清屏 alpha 才能跟面板同步。
+    return motion::Ease(g_trans_t);
+}
+
+void RefreshBlurOpacity(int blur_opacity) {
+    g_blur_opacity = blur_opacity;
+    if (g_blur_opacity < 0) g_blur_opacity = 0;
+    if (g_blur_opacity > 100) g_blur_opacity = 100;
+    if (g_trans_t >= 1.f) {
+        ApplyTheme(Theme::Blur, g_blur_opacity);
+    }
+}
+
+float BlurClearAlpha(int blur_opacity) {
+    if (blur_opacity < 0) blur_opacity = 0;
+    if (blur_opacity > 100) blur_opacity = 100;
+    // clear tint lighter than panels: 0.08 .. 0.42
+    return 0.08f + 0.34f * (blur_opacity / 100.f);
 }
 
 void LoadFontsAndStyle() {
@@ -303,7 +404,9 @@ void LoadFontsAndStyle() {
     font_title   = io.Fonts->AddFontFromMemoryTTF(chMuseoSans700, sizeof(chMuseoSans700), 20.f * ui_scale, &cfg);
     MergeCjkInto(io, 20.f * ui_scale);
     MergeEmojiInto(io, 20.f * ui_scale);
-    font_logo    = io.Fonts->AddFontFromMemoryTTF(chMuseoSans900, sizeof(chMuseoSans900), 18.f * ui_scale, &cfg);
+    font_logo    = io.Fonts->AddFontFromMemoryTTF(chMuseoSans900, sizeof(chMuseoSans900), 24.f * ui_scale, &cfg);
+    font_lyrics  = io.Fonts->AddFontFromMemoryTTF(chMuseoSans700, sizeof(chMuseoSans700), 38.f * ui_scale, &cfg);
+    MergeCjkInto(io, 38.f * ui_scale);
 
     io.FontDefault = font_body;
 
@@ -324,7 +427,7 @@ void LoadFontsAndStyle() {
     s.AntiAliasedFill   = true;
     s.ScaleAllSizes(ui_scale);
 
-    ApplyTheme(Theme::Dark);
+    ApplyTheme(Theme::Dark, 55);
 }
 
 }

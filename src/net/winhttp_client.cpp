@@ -53,8 +53,8 @@ bool HttpGet(const std::string& url,
     // DEFAULT_PROXY 会用 Windows 系统代理配置(IE/Edge 那栏 / `netsh winhttp set proxy`)。
     // 用户开 Clash/v2ray 且设了系统代理时,GitHub 这种被墙的 URL 走代理就通了。
     // 没设代理就跟 NO_PROXY 一样直连,不会破坏既有行为。
-    HINTERNET hSession = WinHttpOpen(L"vrc-lyrics/0.1",
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"vrc-lyrics/3.4",
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
 
@@ -68,6 +68,9 @@ bool HttpGet(const std::string& url,
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    DWORD decompress=WINHTTP_DECOMPRESSION_FLAG_GZIP | WINHTTP_DECOMPRESSION_FLAG_DEFLATE;
+    WinHttpSetOption(hRequest,WINHTTP_OPTION_DECOMPRESSION,&decompress,sizeof(decompress));
 
     std::wstring whdr = Utf8ToWide(headers);
     BOOL sent = WinHttpSendRequest(hRequest,
@@ -85,17 +88,20 @@ bool HttpGet(const std::string& url,
         out_status = (int)code;
 
         DWORD avail = 0;
+        bool complete=false;
         do {
             avail = 0;
             if (!WinHttpQueryDataAvailable(hRequest, &avail)) break;
-            if (avail == 0) break;
+            if (avail == 0) { complete=true; break; }
+            if(out_body.size()+avail>16*1024*1024)break;
             std::vector<char> buf(avail);
             DWORD read = 0;
             if (!WinHttpReadData(hRequest, buf.data(), avail, &read)) break;
+            if(read==0)break;
             out_body.append(buf.data(), read);
         } while (avail > 0);
 
-        ok = (code >= 200 && code < 300);
+        ok = complete && (code >= 200 && code < 300);
     }
 
     WinHttpCloseHandle(hRequest);

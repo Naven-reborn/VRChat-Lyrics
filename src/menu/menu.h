@@ -1,6 +1,7 @@
 #pragma once
 #include "style.h"
 #include "i18n/i18n.h"
+#include "bilibili/parser.h"
 #include <cstdint>
 #include <string>
 
@@ -15,6 +16,9 @@ struct State {
 
     i18n::Lang language = i18n::Lang::EN;
     Theme      theme    = Theme::Dark;
+    // Blur opacity 0..100. 0=more glass, 100=more solid. Default 55. Persisted.
+    int        blur_opacity = 55;
+
 
     // Home tab (placeholder bindings — will move to AppState later)
     bool service_running = false;
@@ -55,6 +59,11 @@ struct State {
     int         np_dur_ms     = 0;
     bool        np_has_lyrics = false;
     char        np_current_line[512] = "";
+    std::string np_track_key;
+    bool lyric_motion = true;
+    bool ui_motion = true;
+    bool scroll_to_format = false;
+    void* cover_square_srv = nullptr;
     // 音乐源:0=Other 1=NetEase 2=Spotify 3=YTMusic,跟 playback::Source 一一对应。
     // main.cpp 每帧推,NOW PLAYING 卡里显示成 "NetEase Cloud" / "Spotify" / ...
     int         np_source = 0;
@@ -79,6 +88,39 @@ struct State {
     bool strip_metadata_tags = true;
     // 关窗时最小化到托盘后台跑(默认开)。关掉则真正退出进程。
     bool minimize_to_tray = true;
+
+    // ---- Chatbox 格式构建器(v3.3) ----
+    // 不再让用户手敲模板字符串:用「字段顺序 + 开关」拼出最终文案。
+    // 兼容旧 config 的 fmt_lyrics/fmt_no_lyrics/fmt_paused 字符串(启动时迁移一次)。
+    //
+    // 字段 id(存在 order[] 里):
+    //   0=status  1=icon  2=title  3=artist  4=progress  5=lyrics
+    // order 里 0xFF 结尾;最多 6 个字段。
+    // layout: 0=单行  1=两行(歌词/进度换行,前面用空格拼,后面单独一行)
+    // sep_style: 0=" - "  1=" · "  2=" | "  3=" "
+    static constexpr int kFmtFieldCount = 6;
+    static constexpr int kFmtOrderCap   = 8; // 6 fields + sentinel room
+    struct FmtBuilder {
+        // 字段顺序,值是 field id;0xFF = 结束
+        unsigned char order[kFmtOrderCap] = {
+            0, 1, 2, 3, 5, 0xFF, 0xFF, 0xFF
+        };
+        // 各字段是否启用(按 field id 索引)
+        bool enabled[kFmtFieldCount] = {
+            true,  // status
+            true,  // icon
+            true,  // title
+            true,  // artist
+            false, // progress (默认有歌词时不显示进度)
+            true,  // lyrics
+        };
+        int  layout    = 1; // 0=one-line 1=two-line
+        int  sep_style = 0; // 0=" - " 1=" · " 2=" | " 3=" "
+    };
+    // 两种场景各一份构建器
+    FmtBuilder fmt_with_lyrics;   // 有歌词(播放/暂停都用,暂停时 icon 会变 ⏸)
+    FmtBuilder fmt_without_lyrics; // 无歌词 / 前奏
+    // 旧版字符串模板(仅兼容读取/迁移;新 UI 不再编辑它们)
     char fmt_lyrics[256]    = "{status} {name} - {artist}\n{mic} {lyrics}";
     char fmt_no_lyrics[256] = "{status} {name} - {artist}";
     char fmt_paused[256]    = "{status} {name} - {artist}";
@@ -117,13 +159,18 @@ struct State {
     // Video parser tab. main.cpp 拉一个 worker 跑 bilibili::Parse,
     // 解析期间 video_status=1,完成后填 video_result_url + video_status=2/3。
     char  video_input[512]      = "";    // 用户输入(BV / URL / b23.tv)
-    char  video_result_url[4096]= "";    // 最终直链,UI 显示 + 复制用
+    char  video_result_url[8193]= "";    // signed URL, including query parameters
     char  video_result_title[256]= "";   // 视频标题
     char  video_result_meta[128] = "";   // "1440P · DASH · upos-sz-..."
     char  video_error[128]      = "";    // 失败时的本地化提示
     int   video_status          = 0;     // 0=idle 1=parsing 2=ok 3=error
     bool  video_parse_request   = false;
     bool  video_copy_request    = false;
+    bool  video_copy_source_request = false;
+    int video_page_index=0, video_quality_index=0, video_stream_index=0;
+    bilibili::ParseResult video_result;
+    bool video_input_changed=true;
+    std::string video_last_input;
     float video_copy_toast_sec  = 0.f;   // 复制成功 toast 倒计时
 };
 
@@ -133,6 +180,24 @@ void Draw(State& s, int win_w, int win_h);
 // 优先级:status_override > AFK > 前台应用。空串表示不挂任何前缀。
 // UI 预览和 main.cpp 构造 chatbox 都调这个,保证两边显示一致。
 std::string EffectiveStatusPrefix(const State& s);
+
+// Chatbox 格式构建器:把 FmtBuilder + 当前播放状态渲染成最终气泡文案。
+// status_prefix 已经带 " · " 尾巴(或空);playing 决定 icon 用 ▶/⏸。
+// has_lyrics_line 决定走 with_lyrics 还是 no_lyrics 那份 builder。
+std::string RenderChatbox(
+    const State& s,
+    const char* status_prefix,
+    bool playing,
+    bool has_lyrics_line,
+    const char* lyrics_line);
+
+// 字段显示名(中英繁)。field_id 0..5。
+const char* FmtFieldLabel(int field_id);
+// 分隔符字面量。
+const char* FmtSepLiteral(int sep_style);
+
+// 从旧模板字符串迁移到 builder(仅当 builder 仍是默认时)。config::Load 后调。
+void MigrateLegacyFormats(State& s);
 
 // Custom widgets matching the Neverlose look.
 bool NLToggle(const char* label, bool* v);

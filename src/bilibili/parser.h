@@ -1,33 +1,31 @@
 #pragma once
+#include <cstdint>
+#include <functional>
 #include <string>
+#include <vector>
 
 namespace bilibili {
-
-// 错误码用枚举,具体翻译在 menu.cpp 里做,不污染解析层。
-enum class ErrorCode {
-    None = 0,
-    NoBv,             // 没从输入里提到 BV 号
-    ShortlinkFailed,  // b23.tv 短链没拿到 Location
-    Network,          // HTTP 失败 / 超时 / DNS
-    Api,              // bilibili API 返回 code != 0(可能是地区限制 / 需要登录)
-    NoStream,         // playurl 没有可用的 dash.video / durl
-    JsonInvalid,      // JSON 解析失败
-};
-
+enum class ErrorCode { None, NoBv, ShortlinkFailed, Network, Api, NoStream,
+    JsonInvalid, InvalidPage, Offline, Restricted, SeparateStreams };
+struct Page { int number=1; int64_t cid=0; std::string title; int duration=0; };
+struct Quality { int id=0; std::string label; };
+struct Stream { std::string url, label, format; };
+struct ParseOptions { int page=0; int quality=0; };
 struct ParseResult {
-    bool        ok       = false;
-    ErrorCode   error    = ErrorCode::None;
-    std::string bvid;       // 解析出来的 BV 号
-    std::string title;      // utf-8 视频标题(多P时会拼 "总标题 - P名")
-    std::string url;        // 最终可在 VRChat 里播放的直链
-    std::string format;     // "DASH" / "FLV" / "MP4"
-    std::string quality;    // 实际选中的质量,如 "1440P" / "1080P"
-    std::string node;       // 使用的 CDN 节点域名
-    int         page     = 1; // 实际解析到的分P(1-based)
+    bool ok=false, live=false;
+    ErrorCode error=ErrorCode::None;
+    int api_code=0, http_status=0;
+    std::string bvid,title,url,format,quality,node,message,warning,source_url;
+    int page=1, actual_quality=0, requested_quality=0;
+    std::vector<Page> pages;
+    std::vector<Quality> qualities;
+    std::vector<Stream> streams;
 };
-
-// 同步解析。input 可以是裸 BV 号 / 完整 bilibili.com URL / b23.tv 短链。
-// 函数会自己处理重定向和 API 调用,失败时 ok=false 并填 error。
-ParseResult Parse(const std::string& input);
-
+// Test seam; normal calls use WinHTTP. No cookies or credentials are collected.
+struct Transport {
+    std::function<bool(const std::string&,const std::string&,std::string&,int&)> get;
+    std::function<bool(const std::string&,const std::string&,std::string&,int&)> redirect;
+};
+ParseResult Parse(const std::string& input, const ParseOptions& options={}, const Transport& transport={});
+std::string QualityLabel(int quality,bool live=false);
 }

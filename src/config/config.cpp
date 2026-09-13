@@ -19,7 +19,11 @@ static std::filesystem::path ConfigDir() {
     }
     std::filesystem::path p = appdata;
     CoTaskMemFree(appdata);
+#ifdef VRC_UI_TEST
+    return p / L"vrc-lyrics-ui-test";
+#else
     return p / L"vrc-lyrics";
+#endif
 }
 
 static std::filesystem::path ConfigPath() {
@@ -55,8 +59,15 @@ void Load(menu::State& s) {
     s.language = (i18n::Lang)lang;
     int th = (int)s.theme;
     get_int("theme", th);
+    // 0=Dark 1=Light 2=Blur;越界回 Dark,避免脏 config 把 UI 弄崩。
+    if (th < 0 || th > 2) th = 0;
     s.theme = (menu::Theme)th;
+    get_int("blur_opacity", s.blur_opacity);
+    if (s.blur_opacity < 0) s.blur_opacity = 0;
+    if (s.blur_opacity > 100) s.blur_opacity = 100;
     get_bool("send_while_paused",  s.send_while_paused);
+    get_bool("lyric_motion", s.lyric_motion);
+    get_bool("ui_motion", s.ui_motion);
     get_bool("show_foreground_app",s.show_foreground_app);
     get_bool("minimize_to_tray",   s.minimize_to_tray);
     get_str ("osc_host",           s.osc_host, sizeof(s.osc_host));
@@ -68,6 +79,40 @@ void Load(menu::State& s) {
     get_str ("fmt_lyrics",         s.fmt_lyrics,    sizeof(s.fmt_lyrics));
     get_str ("fmt_no_lyrics",      s.fmt_no_lyrics, sizeof(s.fmt_no_lyrics));
     get_str ("fmt_paused",         s.fmt_paused,    sizeof(s.fmt_paused));
+
+    // v3.3 format builder
+    auto load_builder = [&](const char* key, menu::State::FmtBuilder& b) {
+        if (!j.contains(key) || !j[key].is_object()) return;
+        const auto& o = j[key];
+        if (o.contains("layout") && o["layout"].is_number_integer())
+            b.layout = o["layout"].get<int>();
+        if (o.contains("sep") && o["sep"].is_number_integer())
+            b.sep_style = o["sep"].get<int>();
+        if (o.contains("order") && o["order"].is_array()) {
+            int n = 0;
+            for (auto& v : o["order"]) {
+                if (n >= menu::State::kFmtOrderCap - 1) break;
+                if (v.is_number_integer()) {
+                    int id = v.get<int>();
+                    if (id >= 0 && id < menu::State::kFmtFieldCount)
+                        b.order[n++] = (unsigned char)id;
+                }
+            }
+            for (int i = n; i < menu::State::kFmtOrderCap; ++i) b.order[i] = 0xFF;
+        }
+        if (o.contains("enabled") && o["enabled"].is_array()) {
+            int i = 0;
+            for (auto& v : o["enabled"]) {
+                if (i >= menu::State::kFmtFieldCount) break;
+                if (v.is_boolean()) b.enabled[i] = v.get<bool>();
+                ++i;
+            }
+        }
+    };
+    load_builder("fmt_builder_lyrics", s.fmt_with_lyrics);
+    load_builder("fmt_builder_no_lyrics", s.fmt_without_lyrics);
+    // 旧字符串 → builder(仅默认 builder 时)
+    menu::MigrateLegacyFormats(s);
 
     get_str  ("audio_target_device_id", s.audio_target_device_id, sizeof(s.audio_target_device_id));
     get_float("audio_gain_db",          s.audio_gain_db);
@@ -94,7 +139,10 @@ bool Save(const menu::State& s) {
     nlohmann::json j;
     j["language"]           = (int)s.language;
     j["theme"]              = (int)s.theme;
+    j["blur_opacity"]       = s.blur_opacity;
     j["send_while_paused"]  = s.send_while_paused;
+    j["lyric_motion"] = s.lyric_motion;
+    j["ui_motion"] = s.ui_motion;
     j["show_foreground_app"]= s.show_foreground_app;
     j["minimize_to_tray"]   = s.minimize_to_tray;
     j["osc_host"]           = s.osc_host;
@@ -103,9 +151,29 @@ bool Save(const menu::State& s) {
     j["lyrics_provider"]    = s.lyrics_provider;
     j["include_translation"]= s.include_translation;
     j["strip_metadata_tags"]= s.strip_metadata_tags;
+    // 旧字符串字段仍写出,方便回滚旧版;真正生效的是 builder。
     j["fmt_lyrics"]         = s.fmt_lyrics;
     j["fmt_no_lyrics"]      = s.fmt_no_lyrics;
     j["fmt_paused"]         = s.fmt_paused;
+
+    auto save_builder = [](const menu::State::FmtBuilder& b) {
+        nlohmann::json o;
+        o["layout"] = b.layout;
+        o["sep"]    = b.sep_style;
+        nlohmann::json order = nlohmann::json::array();
+        for (int i = 0; i < menu::State::kFmtOrderCap; ++i) {
+            if (b.order[i] == 0xFF) break;
+            order.push_back((int)b.order[i]);
+        }
+        o["order"] = order;
+        nlohmann::json en = nlohmann::json::array();
+        for (int i = 0; i < menu::State::kFmtFieldCount; ++i)
+            en.push_back(b.enabled[i]);
+        o["enabled"] = en;
+        return o;
+    };
+    j["fmt_builder_lyrics"]    = save_builder(s.fmt_with_lyrics);
+    j["fmt_builder_no_lyrics"] = save_builder(s.fmt_without_lyrics);
 
     j["audio_target_device_id"] = s.audio_target_device_id;
     j["audio_gain_db"]          = s.audio_gain_db;

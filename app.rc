@@ -2,3 +2,26 @@
 // Do NOT use an undeclared symbolic name here: rc.exe would treat it as a
 // string name and LoadImage(MAKEINTRESOURCE(1)) would fail silently.
 1 ICON "assets\\app.ico"
+
+#include <winver.h>
+1 VERSIONINFO
+FILEVERSION 3,4,0,0
+PRODUCTVERSION 3,4,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "VRChat Lyrics 3.4\0"
+            VALUE "FileVersion", "3.4.0.0\0"
+            VALUE "ProductName", "VRChat Lyrics\0"
+            VALUE "ProductVersion", "3.4\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

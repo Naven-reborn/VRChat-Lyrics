@@ -46,7 +46,7 @@ static void ApplyCircleMask(uint8_t* rgba, int w, int h) {
 
 ID3D11ShaderResourceView* CreateCircularTexture(ID3D11Device* device,
                                                  const uint8_t* data, size_t size,
-                                                 int target_px) {
+                                                 int target_px, bool circular) {
     if (!device || !data || size < 4) return nullptr;
     if (!EnsureWIC()) return nullptr;
 
@@ -89,7 +89,7 @@ ID3D11ShaderResourceView* CreateCircularTexture(ID3D11Device* device,
     scaler->Release();
     if (FAILED(hr)) return nullptr;
 
-    ApplyCircleMask(rgba.data(), (int)tw, (int)th);
+    if (circular) ApplyCircleMask(rgba.data(), (int)tw, (int)th);
 
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = tw; desc.Height = th;

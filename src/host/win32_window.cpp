@@ -8,7 +8,7 @@
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
 #define DWMWA_SYSTEMBACKDROP_TYPE 38
 #endif
-// 1 = 关闭,2 = Mica,3 = Acrylic,4 = Tabbed
+// 1 = off, 2 = Mica, 3 = Acrylic, 4 = Tabbed
 static const int kDwmAcrylic = 3;
 
 namespace host {
@@ -99,8 +99,11 @@ bool Win32Window::Create(const wchar_t* title, int width, int height) {
     int x = (mi.rcWork.left + mi.rcWork.right - width) / 2;
     int y = (mi.rcWork.top + mi.rcWork.bottom - height) / 2;
 
+    // 始终带 WS_EX_NOREDIRECTIONBITMAP:渲染走 DirectComposition visual,
+    // 禁止 DWM 抓 HWND redirection 位图。否则切毛玻璃时会把上一帧
+    // 不透明 Dark/Light 画面缓存垫在 Acrylic 下面。
     m_hwnd = CreateWindowEx(
-        WS_EX_APPWINDOW,
+        WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP,
         kClassName,
         title,
         WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU,
@@ -118,10 +121,17 @@ bool Win32Window::Create(const wchar_t* title, int width, int height) {
     DwmSetWindowAttribute(m_hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/,
                           &corner_pref, sizeof(corner_pref));
 
-    // 配合 WM_NCCALCSIZE=0 用 —— 给 DWM 一个 1px 的边框信号,它就会在窗口
-    // 四周画系统级 drop shadow,但因为 client 覆盖整窗,看不到黑边。
-    MARGINS margins{ 1, 1, 1, 1 };
-    DwmExtendFrameIntoClientArea(m_hwnd, &margins);
+    // composition 路径:整窗 margins 扩展,让 DWM 把 client 当可透区域。
+    // 不透明主题靠 clear alpha=1 盖住;Blur 主题靠 Acrylic + 半透明 clear。
+    MARGINS full{ -1, -1, -1, -1 };
+    DwmExtendFrameIntoClientArea(m_hwnd, &full);
+
+    // 默认关闭系统 backdrop;Blur 主题会在运行时 SetAcrylicBlur(true)。
+    {
+        int backdrop = 1; // DWMSBT_NONE
+        DwmSetWindowAttribute(m_hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
+                              &backdrop, sizeof(backdrop));
+    }
 
     // 图标必须在 ShowWindow 之前设好,否则任务栏会缓存默认空白图标。
     ApplyAppIcon(m_hwnd);
@@ -148,6 +158,34 @@ void Win32Window::Show() {
 void Win32Window::Hide() {
     if (!m_hwnd) return;
     ShowWindow(m_hwnd, SW_HIDE);
+}
+
+bool Win32Window::SetAcrylicBlur(bool enable) {
+    if (!m_hwnd) return false;
+    if (enable == m_acrylic) return m_acrylic;
+
+    // Win11 22H2+: DWMWA_SYSTEMBACKDROP_TYPE
+    // 1=None 2=Mica 3=Acrylic 4=Tabbed
+    // Window is created composition-friendly; only toggle backdrop type here.
+    int backdrop = enable ? kDwmAcrylic : 1 /*NONE*/;
+    HRESULT hr = DwmSetWindowAttribute(m_hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
+                                       &backdrop, sizeof(backdrop));
+    if (FAILED(hr)) {
+        m_acrylic = false;
+        return false;
+    }
+
+    // composition path always needs full-frame transparent margins
+    MARGINS full{ -1, -1, -1, -1 };
+    DwmExtendFrameIntoClientArea(m_hwnd, &full);
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(m_hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/,
+                          &dark, sizeof(dark));
+
+    m_acrylic = enable;
+    SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+    return true;
 }
 
 void Win32Window::Destroy() {

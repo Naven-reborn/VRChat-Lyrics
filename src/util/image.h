@@ -14,6 +14,7 @@ namespace util {
 ID3D11ShaderResourceView* CreateCircularTexture(ID3D11Device* device,
                                                  const uint8_t* data,
                                                  size_t size,
-                                                 int target_px = 128);
+                                                 int target_px = 128,
+                                                 bool circular = true);
 
 }

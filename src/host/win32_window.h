@@ -29,6 +29,11 @@ public:
     // (so close/minimize/icon buttons can receive clicks).
     void SetTitleButtonZone(int px) { m_title_btn_zone = px; }
 
+    // Win11 Acrylic backdrop. enable=true 时 DWMWA_SYSTEMBACKDROP_TYPE=Acrylic。
+    // 返回是否真正生效(老系统会失败并保持不透明)。
+    bool SetAcrylicBlur(bool enable);
+    bool AcrylicEnabled() const { return m_acrylic; }
+
 private:
     static LRESULT CALLBACK WndProcThunk(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -39,6 +44,7 @@ private:
     bool m_resized = false;
     int m_drag_strip_h = 40;
     int m_title_btn_zone = 180;
+    bool m_acrylic = false;
     MessageHook m_hook;
 };
 
